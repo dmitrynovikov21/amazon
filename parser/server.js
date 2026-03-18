@@ -1,0 +1,428 @@
+const express = require('express');
+const multer = require('multer');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const XLSX = require('xlsx');
+const ExcelJS = require('exceljs');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+const config = require('./config.json');
+const db = require('./db');
+
+// Initialize database
+db.init();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Serve images
+app.use('/images', express.static(path.resolve(__dirname, config.paths.images)));
+
+// Upload config
+const uploadDir = path.resolve(__dirname, config.paths.uploads);
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const upload = multer({ dest: uploadDir });
+
+// Ensure other directories exist
+const imagesDir = path.resolve(__dirname, config.paths.images);
+const logsDir = path.resolve(__dirname, config.paths.logs);
+if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
+if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+
+// --------------- Auth middleware ---------------
+
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith('Bearer ')
+    ? authHeader.split(' ')[1]
+    : null;
+
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  try {
+    req.user = jwt.verify(token, config.jwtSecret);
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// --------------- Auth ---------------
+
+// POST /api/auth/login
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password required' });
+    }
+
+    const user = db.db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const valid = bcrypt.compareSync(password, user.password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username },
+      config.jwtSecret,
+      { expiresIn: '24h' }
+    );
+
+    res.json({ token, username: user.username });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --------------- Jobs ---------------
+
+// GET /api/jobs
+app.get('/api/jobs', authMiddleware, (req, res) => {
+  try {
+    const jobs = db.getJobs();
+    res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/jobs
+app.post('/api/jobs', authMiddleware, (req, res) => {
+  try {
+    const { name, speed } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: 'Job name is required' });
+    }
+    const job = db.createJob(name, null, 0, speed || config.defaultSpeed);
+    res.status(201).json(job);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/jobs/:id
+app.get('/api/jobs/:id', authMiddleware, (req, res) => {
+  try {
+    const job = db.getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    res.json(job);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/jobs/:id
+app.patch('/api/jobs/:id', authMiddleware, (req, res) => {
+  try {
+    const job = db.getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const { action, speed } = req.body;
+
+    // Handle speed update
+    if (speed !== undefined) {
+      db.db.prepare('UPDATE jobs SET speed = ? WHERE id = ?').run(speed, req.params.id);
+    }
+
+    // Handle status actions
+    if (action) {
+      let newStatus;
+      switch (action) {
+        case 'start':
+          newStatus = 'running';
+          break;
+        case 'pause':
+          newStatus = 'paused';
+          break;
+        case 'stop':
+          newStatus = 'stopped';
+          break;
+        default:
+          return res.status(400).json({ error: 'Invalid action. Use: start, pause, stop' });
+      }
+      const updated = db.updateJobStatus(req.params.id, newStatus);
+      return res.json(updated);
+    }
+
+    res.json(db.getJob(req.params.id));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/jobs/:id
+app.delete('/api/jobs/:id', authMiddleware, (req, res) => {
+  try {
+    const job = db.getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    db.deleteJob(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --------------- Upload ---------------
+
+// POST /api/jobs/:id/upload
+app.post('/api/jobs/:id/upload', authMiddleware, upload.single('file'), (req, res) => {
+  try {
+    const job = db.getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const filePath = req.file.path;
+    const workbook = XLSX.readFile(filePath);
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+    if (!data || data.length === 0) {
+      return res.status(400).json({ error: 'Empty file' });
+    }
+
+    // Find SKU column: check if first row has "SKU" header
+    let skuColIndex = 0;
+    const header = data[0];
+    if (Array.isArray(header)) {
+      const skuIdx = header.findIndex(
+        (h) => typeof h === 'string' && h.trim().toUpperCase() === 'SKU'
+      );
+      if (skuIdx >= 0) {
+        skuColIndex = skuIdx;
+      }
+    }
+
+    // Determine start row: skip header if "SKU" column was found by name
+    const startRow = skuColIndex > 0 || (typeof header[0] === 'string' && header[0].trim().toUpperCase() === 'SKU') ? 1 : 0;
+
+    const skus = [];
+    for (let i = startRow; i < data.length; i++) {
+      const row = data[i];
+      if (row && row[skuColIndex] !== undefined && row[skuColIndex] !== null && String(row[skuColIndex]).trim() !== '') {
+        skus.push(String(row[skuColIndex]).trim());
+      }
+    }
+
+    if (skus.length === 0) {
+      return res.status(400).json({ error: 'No SKUs found in the file' });
+    }
+
+    // Save source file reference
+    db.db.prepare('UPDATE jobs SET source_file = ? WHERE id = ?').run(req.file.originalname, req.params.id);
+
+    // Add items to queue
+    const result = db.addItems(req.params.id, skus);
+
+    // Clean up uploaded file
+    try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
+
+    res.json({
+      success: true,
+      filename: req.file.originalname,
+      skus_found: skus.length,
+      ...result
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --------------- Items ---------------
+
+// GET /api/jobs/:id/items
+app.get('/api/jobs/:id/items', authMiddleware, (req, res) => {
+  try {
+    const job = db.getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const result = db.getItems(req.params.id, page, limit);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/jobs/:id/items/:itemId
+app.get('/api/jobs/:id/items/:itemId', authMiddleware, (req, res) => {
+  try {
+    const item = db.getItem(req.params.itemId);
+    if (!item || item.job_id !== parseInt(req.params.id)) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+    res.json(item);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --------------- Export ---------------
+
+// GET /api/jobs/:id/export
+app.get('/api/jobs/:id/export', authMiddleware, async (req, res) => {
+  try {
+    const job = db.getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    // Get all items for this job
+    const items = db.db.prepare('SELECT * FROM queue WHERE job_id = ? ORDER BY id ASC').all(req.params.id);
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Amazon Parser';
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet('Results');
+
+    // Define columns
+    sheet.columns = [
+      { header: 'SKU', key: 'sku', width: 18 },
+      { header: 'Status', key: 'status', width: 10 },
+      { header: 'Zoro Brand', key: 'zoro_brand', width: 18 },
+      { header: 'Zoro MFR No', key: 'zoro_mfr_no', width: 18 },
+      { header: 'Zoro UPC', key: 'zoro_upc', width: 18 },
+      { header: 'Zoro Title', key: 'zoro_title', width: 40 },
+      { header: 'Zoro Price', key: 'zoro_price', width: 12 },
+      { header: 'Zoro Qty', key: 'zoro_qty', width: 10 },
+      { header: 'Zoro Image', key: 'zoro_image_main', width: 30 },
+      { header: 'Zoro URL', key: 'zoro_url', width: 40 },
+      { header: 'ASIN', key: 'asin', width: 14 },
+      { header: 'Amazon Title', key: 'amazon_title', width: 40 },
+      { header: 'Amazon Price', key: 'amazon_price', width: 12 },
+      { header: 'Amazon Seller', key: 'amazon_seller', width: 20 },
+      { header: 'Amazon Qty', key: 'amazon_qty', width: 10 },
+      { header: 'Amazon Rating', key: 'amazon_rating', width: 12 },
+      { header: 'Amazon Reviews', key: 'amazon_review_count', width: 14 },
+      { header: 'Amazon BSR', key: 'amazon_bsr', width: 14 },
+      { header: 'Amazon Weight', key: 'amazon_weight', width: 14 },
+      { header: 'Amazon Dimensions', key: 'amazon_dimensions', width: 20 },
+      { header: 'Amazon Image', key: 'amazon_image_main', width: 30 },
+      { header: 'Amazon URL', key: 'amazon_url', width: 40 },
+      { header: 'Competitor Amazon', key: 'competitor_amazon', width: 18 },
+      { header: 'Seller is Brand', key: 'seller_is_brand', width: 14 },
+      { header: 'Is Oversized', key: 'is_oversized', width: 12 },
+      { header: 'Is Minority Owned', key: 'is_minority_owned', width: 16 },
+      { header: 'Margin %', key: 'margin_percent', width: 10 },
+      { header: 'Recommendation', key: 'recommendation', width: 18 },
+      { header: 'AI Model', key: 'ai_model', width: 14 },
+      { header: 'AI Photo Match', key: 'ai_photo_match', width: 14 },
+      { header: 'AI Analysis', key: 'ai_analysis', width: 40 },
+      { header: 'AI Recommendation', key: 'ai_recommendation_reason', width: 40 },
+      { header: 'Error', key: 'error_message', width: 30 },
+    ];
+
+    // Style header row
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF4472C4' }
+    };
+    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+
+    // Add data rows
+    for (const item of items) {
+      sheet.addRow({
+        sku: item.sku,
+        status: item.status,
+        zoro_brand: item.zoro_brand,
+        zoro_mfr_no: item.zoro_mfr_no,
+        zoro_upc: item.zoro_upc,
+        zoro_title: item.zoro_title,
+        zoro_price: item.zoro_price,
+        zoro_qty: item.zoro_qty,
+        zoro_image_main: item.zoro_image_main,
+        zoro_url: item.zoro_url,
+        asin: item.asin,
+        amazon_title: item.amazon_title,
+        amazon_price: item.amazon_price,
+        amazon_seller: item.amazon_seller,
+        amazon_qty: item.amazon_qty,
+        amazon_rating: item.amazon_rating,
+        amazon_review_count: item.amazon_review_count,
+        amazon_bsr: item.amazon_bsr,
+        amazon_weight: item.amazon_weight,
+        amazon_dimensions: item.amazon_dimensions,
+        amazon_image_main: item.amazon_image_main,
+        amazon_url: item.amazon_url,
+        competitor_amazon: item.competitor_amazon,
+        seller_is_brand: item.seller_is_brand,
+        is_oversized: item.is_oversized,
+        is_minority_owned: item.is_minority_owned,
+        margin_percent: item.margin_percent,
+        recommendation: item.recommendation,
+        ai_model: item.ai_model,
+        ai_photo_match: item.ai_photo_match,
+        ai_analysis: item.ai_analysis,
+        ai_recommendation_reason: item.ai_recommendation_reason,
+        error_message: item.error_message,
+      });
+    }
+
+    // Send file
+    const filename = `${job.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_export_${Date.now()}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --------------- Stats ---------------
+
+// GET /api/stats
+app.get('/api/stats', authMiddleware, (req, res) => {
+  try {
+    const stats = db.getStats();
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --------------- SPA fallback ---------------
+
+app.get('*', (req, res) => {
+  const indexPath = path.join(__dirname, 'public', 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+// --------------- Start ---------------
+
+const PORT = config.port || 8080;
+app.listen(PORT, () => {
+  console.log(`Amazon Parser server running on http://localhost:${PORT}`);
+});

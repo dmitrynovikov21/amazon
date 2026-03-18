@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Amazon Parser</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- NAVBAR -->
+  <nav class="navbar">
+    <div class="navbar-brand" onclick="App.navigate('dashboard')">
+      <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12zM6 10h2v2H6v-2zm0 4h8v2H6v-2zm10 0h2v2h-2v-2zm-6-4h8v2h-8v-2z"/></svg>
+      Amazon Parser
+    </div>
+    <div class="navbar-actions">
+      <button class="btn btn-outline btn-sm" onclick="App.logout()">Logout</button>
+    </div>
+  </nav>
+
+  <!-- MAIN -->
+  <main class="main-content">
+    <!-- Dashboard View -->
+    <div id="view-dashboard" class="view" style="display:none;">
+      <div class="stats-grid" id="statsGrid">
+        <div class="stat-card stat-primary">
+          <span class="stat-label">Total Jobs</span>
+          <span class="stat-value" id="stat-jobs">-</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Total Items</span>
+          <span class="stat-value" id="stat-items">-</span>
+        </div>
+        <div class="stat-card stat-success">
+          <span class="stat-label">Parsed</span>
+          <span class="stat-value" id="stat-parsed">-</span>
+        </div>
+        <div class="stat-card stat-danger">
+          <span class="stat-label">Errors</span>
+          <span class="stat-value" id="stat-errors">-</span>
+        </div>
+      </div>
+
+      <div class="section-header">
+        <h2>Jobs</h2>
+        <button class="btn btn-primary" onclick="App.openNewJobModal()">+ New Job</button>
+      </div>
+
+      <div class="table-wrapper">
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Speed</th>
+                <th>Created</th>
+                <th style="text-align:right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="jobsTableBody">
+              <tr><td colspan="6" class="loading-overlay"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Job Detail View -->
+    <div id="view-job" class="view" style="display:none;">
+      <div class="breadcrumb">
+        <a href="#dashboard" onclick="App.navigate('dashboard'); return false;">Dashboard</a>
+        <span class="separator">/</span>
+        <span class="current" id="jobBreadcrumb">Job</span>
+      </div>
+
+      <div class="job-header" id="jobHeader">
+        <!-- filled by JS -->
+      </div>
+
+      <div class="table-wrapper">
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>ASIN</th>
+                <th>Qty Zoro</th>
+                <th>Qty Amazon</th>
+                <th>Competitor?</th>
+                <th>Price Zoro</th>
+                <th>Competitor Price</th>
+                <th>Brand Seller?</th>
+                <th>Oversized?</th>
+                <th>Minority?</th>
+                <th>Margin %</th>
+                <th>Recommendation</th>
+              </tr>
+            </thead>
+            <tbody id="itemsTableBody">
+              <tr><td colspan="12" class="loading-overlay"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination" id="itemsPagination"></div>
+      </div>
+    </div>
+
+    <!-- Item Detail View -->
+    <div id="view-item" class="view" style="display:none;">
+      <div class="breadcrumb" id="itemBreadcrumb">
+        <!-- filled by JS -->
+      </div>
+      <div id="itemDetailContent">
+        <div class="loading-overlay"><span class="spinner spinner-lg"></span><span>Loading item...</span></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- NEW JOB MODAL -->
+  <div class="modal-overlay" id="newJobModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Create New Job</h3>
+        <button class="modal-close" onclick="App.closeNewJobModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="jobName">Job Name</label>
+          <input type="text" id="jobName" class="form-control" placeholder="e.g. Batch March 2026">
+        </div>
+        <div class="form-group">
+          <label for="jobSpeed">Speed (items/hour)</label>
+          <input type="number" id="jobSpeed" class="form-control" value="50" min="1" max="500">
+        </div>
+        <div class="form-group">
+          <label>Upload Excel File</label>
+          <div class="dropzone" id="dropzone">
+            <div class="dropzone-icon">&#128196;</div>
+            <div class="dropzone-text">Drag & drop file here or <strong>browse</strong></div>
+            <div class="dropzone-hint">.xlsx, .xls, .csv</div>
+            <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+          </div>
+          <div class="dropzone-result" id="dropzoneResult" style="display:none;"></div>
+        </div>
+        <div id="newJobError" class="alert alert-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="App.closeNewJobModal()">Cancel</button>
+        <button class="btn btn-primary" id="createJobBtn" onclick="App.createJob()">Create Job</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ITEM DETAIL MODAL (alternative approach: used when clicking from job detail) -->
+  <!-- We use view-based approach instead -->
+
+  <!-- TOAST CONTAINER -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

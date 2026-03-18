@@ -1,0 +1,13 @@
+{
+  "port": 8080,
+  "cdpEndpoint": "http://138.201.131.95:9223",
+  "jwtSecret": "parser-secret-key-change-in-prod",
+  "defaultSpeed": 50,
+  "defaultUser": { "username": "admin", "password": "admin123" },
+  "paths": {
+    "images": "./images",
+    "uploads": "./uploads",
+    "logs": "./logs",
+    "db": "./parser.db"
+  }
+}

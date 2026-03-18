@@ -1,0 +1,8 @@
+node_modules/
+parser.db
+parser.db-shm
+parser.db-wal
+images/
+uploads/
+logs/
+*.log
