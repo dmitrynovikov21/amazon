@@ -1,15 +1,48 @@
-const Database = require('better-sqlite3');
+const initSqlJs = require('sql.js');
+const fs = require('fs');
 const path = require('path');
 const config = require('./config.json');
 
 const dbPath = path.resolve(__dirname, config.paths.db);
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
 
-// --------------- Schema ---------------
+let db = null;
 
-function init() {
-  db.exec(`
+// Auto-save to disk every 5 seconds if there are changes
+let dirty = false;
+setInterval(() => {
+  if (dirty && db) {
+    const data = db.export();
+    fs.writeFileSync(dbPath, Buffer.from(data));
+    dirty = false;
+  }
+}, 5000);
+
+function save() {
+  dirty = true;
+}
+
+function saveToDisk() {
+  if (db) {
+    const data = db.export();
+    fs.writeFileSync(dbPath, Buffer.from(data));
+    dirty = false;
+  }
+}
+
+// --------------- Init ---------------
+
+async function init() {
+  const SQL = await initSqlJs();
+
+  // Load existing DB or create new
+  if (fs.existsSync(dbPath)) {
+    const buf = fs.readFileSync(dbPath);
+    db = new SQL.Database(buf);
+  } else {
+    db = new SQL.Database();
+  }
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
@@ -61,92 +94,106 @@ function init() {
 
   // Create default user if not exists
   const bcrypt = require('bcryptjs');
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(config.defaultUser.username);
-  if (!existing) {
+  const existing = db.exec('SELECT id FROM users WHERE username = ?', [config.defaultUser.username]);
+  if (!existing.length || !existing[0].values.length) {
     const hash = bcrypt.hashSync(config.defaultUser.password, 10);
-    db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(config.defaultUser.username, hash);
+    db.run('INSERT INTO users (username, password_hash) VALUES (?, ?)', [config.defaultUser.username, hash]);
   }
+
+  saveToDisk();
+}
+
+// --------------- Helpers ---------------
+
+function queryOne(sql, params) {
+  const result = db.exec(sql, params || []);
+  if (!result.length || !result[0].values.length) return null;
+  const cols = result[0].columns;
+  const vals = result[0].values[0];
+  const obj = {};
+  cols.forEach((c, i) => { obj[c] = vals[i]; });
+  return obj;
+}
+
+function queryAll(sql, params) {
+  const result = db.exec(sql, params || []);
+  if (!result.length) return [];
+  const cols = result[0].columns;
+  return result[0].values.map(vals => {
+    const obj = {};
+    cols.forEach((c, i) => { obj[c] = vals[i]; });
+    return obj;
+  });
+}
+
+function runSql(sql, params) {
+  db.run(sql, params || []);
+  save();
+}
+
+function getLastInsertRowId() {
+  const r = db.exec('SELECT last_insert_rowid() AS id');
+  return r[0].values[0][0];
 }
 
 // --------------- Jobs CRUD ---------------
 
 function createJob(name, sourceFile, totalItems, speed) {
-  const stmt = db.prepare(`
-    INSERT INTO jobs (name, source_file, total_items, speed)
-    VALUES (?, ?, ?, ?)
-  `);
-  const info = stmt.run(name, sourceFile || null, totalItems || 0, speed || config.defaultSpeed);
-  return getJob(info.lastInsertRowid);
+  runSql(
+    'INSERT INTO jobs (name, source_file, total_items, speed) VALUES (?, ?, ?, ?)',
+    [name, sourceFile || null, totalItems || 0, speed || config.defaultSpeed]
+  );
+  const id = getLastInsertRowId();
+  return getJob(id);
 }
 
 function getJobs() {
-  return db.prepare(`
+  return queryAll(`
     SELECT j.*,
       (SELECT COUNT(*) FROM queue WHERE job_id = j.id AND status = 'done') AS parsed_items,
       (SELECT COUNT(*) FROM queue WHERE job_id = j.id AND status = 'error') AS error_items,
       (SELECT COUNT(*) FROM queue WHERE job_id = j.id) AS total_items
     FROM jobs j
     ORDER BY j.created_at DESC
-  `).all();
+  `);
 }
 
 function getJob(id) {
-  const job = db.prepare(`
+  return queryOne(`
     SELECT j.*,
       (SELECT COUNT(*) FROM queue WHERE job_id = j.id AND status = 'done') AS parsed_items,
       (SELECT COUNT(*) FROM queue WHERE job_id = j.id AND status = 'error') AS error_items,
       (SELECT COUNT(*) FROM queue WHERE job_id = j.id) AS total_items
     FROM jobs j
     WHERE j.id = ?
-  `).get(id);
-  return job || null;
+  `, [id]);
 }
 
 function updateJobStatus(id, status) {
-  const updates = { status };
   if (status === 'running') {
-    updates.started_at = new Date().toISOString();
+    runSql('UPDATE jobs SET status = ?, started_at = ? WHERE id = ?', [status, new Date().toISOString(), id]);
+  } else if (status === 'done' || status === 'stopped') {
+    runSql('UPDATE jobs SET status = ?, finished_at = ? WHERE id = ?', [status, new Date().toISOString(), id]);
+  } else {
+    runSql('UPDATE jobs SET status = ? WHERE id = ?', [status, id]);
   }
-  if (status === 'done' || status === 'stopped') {
-    updates.finished_at = new Date().toISOString();
-  }
-
-  const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-  const values = Object.values(updates);
-  values.push(id);
-
-  db.prepare(`UPDATE jobs SET ${setClauses} WHERE id = ?`).run(...values);
   return getJob(id);
 }
 
 function deleteJob(id) {
-  const deleteItems = db.prepare('DELETE FROM queue WHERE job_id = ?');
-  const deleteJobStmt = db.prepare('DELETE FROM jobs WHERE id = ?');
-
-  const transaction = db.transaction(() => {
-    deleteItems.run(id);
-    deleteJobStmt.run(id);
-  });
-  transaction();
+  runSql('DELETE FROM queue WHERE job_id = ?', [id]);
+  runSql('DELETE FROM jobs WHERE id = ?', [id]);
 }
 
 // --------------- Queue CRUD ---------------
 
 function addItems(jobId, skus) {
-  const stmt = db.prepare(`
-    INSERT INTO queue (job_id, sku) VALUES (?, ?)
-  `);
-
-  const transaction = db.transaction((items) => {
-    for (const sku of items) {
-      stmt.run(jobId, sku);
-    }
-    // Update total_items count on the job
-    const count = db.prepare('SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ?').get(jobId).cnt;
-    db.prepare('UPDATE jobs SET total_items = ? WHERE id = ?').run(count, jobId);
-  });
-
-  transaction(skus);
+  for (const sku of skus) {
+    runSql('INSERT INTO queue (job_id, sku) VALUES (?, ?)', [jobId, sku]);
+  }
+  const count = queryOne('SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ?', [jobId]).cnt;
+  runSql('UPDATE jobs SET total_items = ? WHERE id = ?', [count, jobId]);
+  saveToDisk();
   return { added: skus.length };
 }
 
@@ -155,11 +202,12 @@ function getItems(jobId, page, limit) {
   limit = limit || 50;
   const offset = (page - 1) * limit;
 
-  const items = db.prepare(`
-    SELECT * FROM queue WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?
-  `).all(jobId, limit, offset);
+  const items = queryAll(
+    'SELECT * FROM queue WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?',
+    [jobId, limit, offset]
+  );
 
-  const total = db.prepare('SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ?').get(jobId).cnt;
+  const total = queryOne('SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ?', [jobId]).cnt;
 
   return {
     items,
@@ -171,22 +219,19 @@ function getItems(jobId, page, limit) {
 }
 
 function getItem(itemId) {
-  return db.prepare('SELECT * FROM queue WHERE id = ?').get(itemId) || null;
+  return queryOne('SELECT * FROM queue WHERE id = ?', [itemId]);
 }
 
 function getNextPending(jobId) {
-  return db.prepare(`
-    SELECT * FROM queue
-    WHERE job_id = ? AND status = 'pending'
-    ORDER BY id ASC
-    LIMIT 1
-  `).get(jobId) || null;
+  return queryOne(
+    "SELECT * FROM queue WHERE job_id = ? AND status = 'pending' ORDER BY id ASC LIMIT 1",
+    [jobId]
+  );
 }
 
 function updateItem(itemId, data) {
   if (!data || Object.keys(data).length === 0) return getItem(itemId);
 
-  // Always update updated_at
   data.updated_at = new Date().toISOString();
 
   const keys = Object.keys(data);
@@ -194,14 +239,14 @@ function updateItem(itemId, data) {
   const values = keys.map(k => data[k]);
   values.push(itemId);
 
-  db.prepare(`UPDATE queue SET ${setClauses} WHERE id = ?`).run(...values);
+  runSql(`UPDATE queue SET ${setClauses} WHERE id = ?`, values);
 
   // Update job counters
   const item = getItem(itemId);
   if (item) {
-    const parsed = db.prepare("SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ? AND status = 'done'").get(item.job_id).cnt;
-    const errors = db.prepare("SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ? AND status = 'error'").get(item.job_id).cnt;
-    db.prepare('UPDATE jobs SET parsed_items = ?, error_items = ? WHERE id = ?').run(parsed, errors, item.job_id);
+    const parsed = queryOne("SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ? AND status = 'done'", [item.job_id]).cnt;
+    const errors = queryOne("SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ? AND status = 'error'", [item.job_id]).cnt;
+    runSql('UPDATE jobs SET parsed_items = ?, error_items = ? WHERE id = ?', [parsed, errors, item.job_id]);
   }
 
   return getItem(itemId);
@@ -210,26 +255,25 @@ function updateItem(itemId, data) {
 // --------------- Stats ---------------
 
 function getStats() {
-  const totalJobs = db.prepare('SELECT COUNT(*) AS cnt FROM jobs').get().cnt;
-  const activeJobs = db.prepare("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'running'").get().cnt;
-  const totalItems = db.prepare('SELECT COUNT(*) AS cnt FROM queue').get().cnt;
-  const parsedItems = db.prepare("SELECT COUNT(*) AS cnt FROM queue WHERE status = 'done'").get().cnt;
-  const errorItems = db.prepare("SELECT COUNT(*) AS cnt FROM queue WHERE status = 'error'").get().cnt;
-  const pendingItems = db.prepare("SELECT COUNT(*) AS cnt FROM queue WHERE status = 'pending'").get().cnt;
+  const totalJobs = queryOne('SELECT COUNT(*) AS cnt FROM jobs').cnt;
+  const activeJobs = queryOne("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'running'").cnt;
+  const totalItems = queryOne('SELECT COUNT(*) AS cnt FROM queue').cnt;
+  const parsedItems = queryOne("SELECT COUNT(*) AS cnt FROM queue WHERE status = 'done'").cnt;
+  const errorItems = queryOne("SELECT COUNT(*) AS cnt FROM queue WHERE status = 'error'").cnt;
+  const pendingItems = queryOne("SELECT COUNT(*) AS cnt FROM queue WHERE status = 'pending'").cnt;
 
-  return {
-    totalJobs,
-    activeJobs,
-    totalItems,
-    parsedItems,
-    errorItems,
-    pendingItems
-  };
+  return { totalJobs, activeJobs, totalItems, parsedItems, errorItems, pendingItems };
+}
+
+// --------------- User queries ---------------
+
+function getUserByUsername(username) {
+  return queryOne('SELECT * FROM users WHERE username = ?', [username]);
 }
 
 module.exports = {
-  db,
   init,
+  saveToDisk,
   createJob,
   getJobs,
   getJob,
@@ -240,5 +284,7 @@ module.exports = {
   getItem,
   getNextPending,
   updateItem,
-  getStats
+  getStats,
+  getUserByUsername,
+  getDb: () => db
 };

@@ -10,8 +10,21 @@ const cors = require('cors');
 const config = require('./config.json');
 const db = require('./db');
 
-// Initialize database
-db.init();
+// Initialize database (async for sql.js) then start server
+async function startServer() {
+  await db.init();
+  console.log('Database initialized');
+
+  const PORT = config.port || 8080;
+  app.listen(PORT, () => {
+    console.log(`Amazon Parser server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer().catch(err => {
+  console.error('Failed to start:', err);
+  process.exit(1);
+});
 
 const app = express();
 app.use(cors());
@@ -62,7 +75,7 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(400).json({ error: 'Username and password required' });
     }
 
-    const user = db.db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    const user = db.getUserByUsername(username);
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -135,7 +148,7 @@ app.patch('/api/jobs/:id', authMiddleware, (req, res) => {
 
     // Handle speed update
     if (speed !== undefined) {
-      db.db.prepare('UPDATE jobs SET speed = ? WHERE id = ?').run(speed, req.params.id);
+      db.getDb().run('UPDATE jobs SET speed = ? WHERE id = ?', [speed, req.params.id]);
     }
 
     // Handle status actions
@@ -230,7 +243,7 @@ app.post('/api/jobs/:id/upload', authMiddleware, upload.single('file'), (req, re
     }
 
     // Save source file reference
-    db.db.prepare('UPDATE jobs SET source_file = ? WHERE id = ?').run(req.file.originalname, req.params.id);
+    db.getDb().run('UPDATE jobs SET source_file = ? WHERE id = ?', [req.file.originalname, req.params.id]);
 
     // Add items to queue
     const result = db.addItems(req.params.id, skus);
@@ -292,7 +305,7 @@ app.get('/api/jobs/:id/export', authMiddleware, async (req, res) => {
     }
 
     // Get all items for this job
-    const items = db.db.prepare('SELECT * FROM queue WHERE job_id = ? ORDER BY id ASC').all(req.params.id);
+    const items = db.getItems(req.params.id, 1, 100000).items;
 
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'Amazon Parser';
@@ -420,9 +433,4 @@ app.get('*', (req, res) => {
   }
 });
 
-// --------------- Start ---------------
-
-const PORT = config.port || 8080;
-app.listen(PORT, () => {
-  console.log(`Amazon Parser server running on http://localhost:${PORT}`);
-});
+// --------------- Start is handled by startServer() above ---------------

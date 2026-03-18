@@ -10,8 +10,7 @@ const { checkCaptcha, checkSession } = require('./scraper/captcha');
 const path = require('path');
 const fs = require('fs');
 
-// Initialize DB
-db.init();
+// Initialize DB (async, called in mainLoop)
 
 // Worker state
 let browser = null;
@@ -505,6 +504,8 @@ async function processItem(item) {
  */
 async function mainLoop() {
   log(null, null, 'INFO', 'Worker starting...');
+  await db.init();
+  log(null, null, 'INFO', 'Database initialized');
   isRunning = true;
 
   // Connect to browser on startup
