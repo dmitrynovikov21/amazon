@@ -452,54 +452,62 @@ async function scrapeZoro(sku) {
   const cleanSku = sku.trim().replace(/[^a-zA-Z0-9\-_.]/g, '');
   if (!cleanSku) return null;
 
-  const searchUrl = `https://www.zoro.com/search?q=${encodeURIComponent(cleanSku)}`;
-  console.log(`[ZORO] Searching: ${searchUrl}`);
+  // Try direct product URL first (works reliably, search is SPA and doesn't return HTML results)
+  const directUrl = `https://www.zoro.com/i/${encodeURIComponent(cleanSku)}/`;
+  console.log(`[ZORO] Direct URL: ${directUrl}`);
 
-  let response;
+  let productHtml = null;
+  let productUrl = null;
+
   try {
-    response = await httpGet(searchUrl);
-  } catch (err) {
-    console.error(`[ZORO] HTTP error: ${err.message}`);
-    return null;
-  }
-
-  if (response.statusCode !== 200) {
-    console.error(`[ZORO] HTTP ${response.statusCode}`);
-    return null;
-  }
-
-  const html = response.body;
-  const finalUrl = response.url;
-
-  // Check if we landed on a product page (redirect from search)
-  const isProductPage = finalUrl.includes('/i/') || finalUrl.match(/\/[A-Za-z0-9\-]+\/[A-Z0-9]+\/?$/);
-
-  let productHtml = html;
-  let productUrl = finalUrl;
-
-  if (!isProductPage) {
-    // We're on search results page — find the first product link
-    console.log('[ZORO] Got search results page, looking for first product...');
-
-    const productLinks = parseSearchResults(html);
-
-    if (productLinks.length === 0) {
-      console.log('[ZORO] No products found in search results');
-      return null;
+    const directResponse = await httpGet(directUrl);
+    if (directResponse.statusCode === 200) {
+      productHtml = directResponse.body;
+      productUrl = directResponse.url;
+      console.log(`[ZORO] Direct URL OK → ${productUrl}`);
+    } else {
+      console.log(`[ZORO] Direct URL returned ${directResponse.statusCode}, trying search...`);
     }
+  } catch (err) {
+    console.log(`[ZORO] Direct URL failed: ${err.message}, trying search...`);
+  }
 
-    console.log(`[ZORO] Found ${productLinks.length} products, fetching first: ${productLinks[0]}`);
+  // Fallback: search (may work if Zoro redirects to product page)
+  if (!productHtml) {
+    const searchUrl = `https://www.zoro.com/search?q=${encodeURIComponent(cleanSku)}`;
+    console.log(`[ZORO] Searching: ${searchUrl}`);
 
     try {
-      const productResponse = await httpGet(productLinks[0]);
-      if (productResponse.statusCode !== 200) {
-        console.error(`[ZORO] Product page HTTP ${productResponse.statusCode}`);
+      const response = await httpGet(searchUrl);
+      if (response.statusCode !== 200) {
+        console.error(`[ZORO] HTTP ${response.statusCode}`);
         return null;
       }
-      productHtml = productResponse.body;
-      productUrl = productResponse.url;
+
+      const finalUrl = response.url;
+      const isProductPage = finalUrl.includes('/i/') || finalUrl.match(/\/[A-Za-z0-9\-]+\/[A-Z0-9]+\/?$/);
+
+      if (isProductPage) {
+        productHtml = response.body;
+        productUrl = finalUrl;
+      } else {
+        // Search results page is SPA — try to find links
+        const productLinks = parseSearchResults(response.body);
+        if (productLinks.length === 0) {
+          console.log('[ZORO] No products found');
+          return null;
+        }
+        console.log(`[ZORO] Found ${productLinks.length} products, fetching first: ${productLinks[0]}`);
+        const productResponse = await httpGet(productLinks[0]);
+        if (productResponse.statusCode !== 200) {
+          console.error(`[ZORO] Product page HTTP ${productResponse.statusCode}`);
+          return null;
+        }
+        productHtml = productResponse.body;
+        productUrl = productResponse.url;
+      }
     } catch (err) {
-      console.error(`[ZORO] Error fetching product page: ${err.message}`);
+      console.error(`[ZORO] Search error: ${err.message}`);
       return null;
     }
   }
