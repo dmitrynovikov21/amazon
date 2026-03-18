@@ -8,6 +8,7 @@ const App = (function () {
   const PAGE_LIMIT = 50;
   let pollTimer = null;
   let selectedFile = null;
+  let inputMode = 'file'; // 'file' or 'text'
 
   // ---- API ----
   function getToken() { return localStorage.getItem('token'); }
@@ -323,12 +324,45 @@ const App = (function () {
   // ---- New Job ----
   function openNewJobModal() {
     selectedFile = null;
+    inputMode = 'file';
     document.getElementById('jobName').value = '';
     document.getElementById('jobSpeed').value = '50';
     document.getElementById('fileInput').value = '';
     document.getElementById('dropzoneResult').style.display = 'none';
     document.getElementById('newJobError').style.display = 'none';
+    document.getElementById('skuTextInput').value = '';
+    document.getElementById('skuTextHint').style.display = 'none';
+    setInputMode('file');
     document.getElementById('newJobModal').classList.add('active');
+  }
+
+  function setInputMode(mode) {
+    inputMode = mode;
+    document.getElementById('inputModeFile').style.display = mode === 'file' ? '' : 'none';
+    document.getElementById('inputModeText').style.display = mode === 'text' ? '' : 'none';
+    document.querySelectorAll('.input-mode-tabs .tab-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === mode);
+    });
+  }
+
+  function parseSkuText(text) {
+    const lines = text.split(/\n/);
+    const items = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      // Try tab-separated first (SKU \t minRetailQty), then comma
+      const parts = trimmed.includes('\t') ? trimmed.split('\t') : trimmed.split(',');
+      const sku = parts[0].trim();
+      if (!sku) continue;
+      let minRetailQty = null;
+      if (parts.length > 1) {
+        const q = parseInt(parts[1].trim());
+        if (!isNaN(q)) minRetailQty = q;
+      }
+      items.push({ sku, minRetailQty });
+    }
+    return items;
   }
 
   function closeNewJobModal() { document.getElementById('newJobModal').classList.remove('active'); }
@@ -340,14 +374,30 @@ const App = (function () {
     const btn = document.getElementById('createJobBtn');
     errEl.style.display = 'none';
     if (!name) { errEl.textContent = 'Enter a job name'; errEl.style.display = 'block'; return; }
+
+    // Check that at least one source has data
+    if (inputMode === 'text') {
+      const text = document.getElementById('skuTextInput').value.trim();
+      if (!text) { errEl.textContent = 'Paste SKU data or switch to file upload'; errEl.style.display = 'block'; return; }
+    }
+
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Creating...';
     try {
       const job = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ name, speed }) });
-      if (selectedFile) {
+
+      if (inputMode === 'text') {
+        const skuItems = parseSkuText(document.getElementById('skuTextInput').value);
+        if (skuItems.length === 0) { throw new Error('No valid SKUs found in text'); }
+        const res = await api('/api/jobs/' + job.id + '/add-skus', {
+          method: 'POST', body: JSON.stringify({ items: skuItems })
+        });
+        toast(`Job created with ${res.added || 0} SKUs`, 'success');
+      } else if (selectedFile) {
         const fd = new FormData(); fd.append('file', selectedFile);
         const up = await api('/api/jobs/' + job.id + '/upload', { method: 'POST', body: fd });
         toast(`Job created with ${up.skus_found||0} SKUs`, 'success');
-      } else { toast('Job created', 'success'); }
+      } else { toast('Job created (no SKUs yet)', 'success'); }
+
       closeNewJobModal(); loadDashboard();
     } catch (err) { errEl.textContent = err.message; errEl.style.display = 'block'; }
     finally { btn.disabled = false; btn.textContent = 'Create Job'; }
@@ -549,6 +599,19 @@ const App = (function () {
       r.style.display = 'block';
     }
 
+    // SKU text live counter
+    const skuInput = document.getElementById('skuTextInput');
+    if (skuInput) {
+      skuInput.addEventListener('input', () => {
+        const items = parseSkuText(skuInput.value);
+        const hint = document.getElementById('skuTextHint');
+        if (items.length > 0) {
+          hint.textContent = `Found ${items.length} SKU${items.length > 1 ? 's' : ''}`;
+          hint.style.display = 'block';
+        } else { hint.style.display = 'none'; }
+      });
+    }
+
     document.getElementById('newJobModal').addEventListener('click', function(e) { if(e.target===this) closeNewJobModal(); });
     document.addEventListener('keydown', e => { if(e.key==='Escape') closeNewJobModal(); });
 
@@ -558,5 +621,5 @@ const App = (function () {
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { navigate, logout: goLogin, openNewJobModal, closeNewJobModal, createJob, deleteJob, doJobAction, jobAction, exportJob, goPage, loadDashboard, loadJobDetail, checkBrowser: checkBrowserStatus, adminCheckBrowser, adminCmd, adminLoadLog };
+  return { navigate, logout: goLogin, openNewJobModal, closeNewJobModal, createJob, setInputMode, deleteJob, doJobAction, jobAction, exportJob, goPage, loadDashboard, loadJobDetail, checkBrowser: checkBrowserStatus, adminCheckBrowser, adminCmd, adminLoadLog };
 })();

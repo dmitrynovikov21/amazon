@@ -287,14 +287,24 @@
           <input type="number" id="jobSpeed" class="form-control" value="50" min="1" max="500">
         </div>
         <div class="form-group">
-          <label>Upload Excel File</label>
-          <div class="dropzone" id="dropzone">
-            <div class="dropzone-icon">&#128196;</div>
-            <div class="dropzone-text">Drag & drop file here or <strong>browse</strong></div>
-            <div class="dropzone-hint">.xlsx, .xls, .csv</div>
-            <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+          <label>SKU Data</label>
+          <div class="input-mode-tabs">
+            <button class="tab-btn active" data-mode="file" onclick="App.setInputMode('file')">File Upload</button>
+            <button class="tab-btn" data-mode="text" onclick="App.setInputMode('text')">Paste Text</button>
           </div>
-          <div class="dropzone-result" id="dropzoneResult" style="display:none;"></div>
+          <div id="inputModeFile">
+            <div class="dropzone" id="dropzone">
+              <div class="dropzone-icon">&#128196;</div>
+              <div class="dropzone-text">Drag & drop file here or <strong>browse</strong></div>
+              <div class="dropzone-hint">.xlsx, .xls, .csv</div>
+              <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+            </div>
+            <div class="dropzone-result" id="dropzoneResult" style="display:none;"></div>
+          </div>
+          <div id="inputModeText" style="display:none;">
+            <textarea id="skuTextInput" class="form-control" rows="8" placeholder="Paste SKUs here — one per line, or comma/tab separated&#10;&#10;Examples:&#10;G0099983&#10;G2292498&#10;G1605081&#10;&#10;Or with minRetailQty (tab-separated):&#10;G0099983&#9;5&#10;G2292498&#9;10"></textarea>
+            <div class="sku-text-hint" id="skuTextHint" style="display:none;"></div>
+          </div>
         </div>
         <div id="newJobError" class="alert alert-error" style="display:none;"></div>
       </div>

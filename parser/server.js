@@ -279,6 +279,36 @@ app.post('/api/jobs/:id/upload', authMiddleware, upload.single('file'), (req, re
   }
 });
 
+// POST /api/jobs/:id/add-skus — add SKUs from text input
+app.post('/api/jobs/:id/add-skus', authMiddleware, (req, res) => {
+  try {
+    const job = db.getJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    const { items } = req.body;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'No SKUs provided' });
+    }
+
+    // Validate and clean
+    const cleanItems = items
+      .filter(i => i && i.sku && String(i.sku).trim())
+      .map(i => ({
+        sku: String(i.sku).trim(),
+        minRetailQty: i.minRetailQty ? parseInt(i.minRetailQty) || null : null
+      }));
+
+    if (cleanItems.length === 0) {
+      return res.status(400).json({ error: 'No valid SKUs found' });
+    }
+
+    const result = db.addItems(req.params.id, cleanItems);
+    res.json({ success: true, added: cleanItems.length, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --------------- Items ---------------
 
 // GET /api/jobs/:id/items
