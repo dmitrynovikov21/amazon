@@ -15,6 +15,11 @@ async function startServer() {
   await db.init();
   console.log('Database initialized');
 
+  // Reload DB from disk every 3s to see worker's changes
+  setInterval(() => {
+    try { db.reloadFromDisk(); } catch(e) { /* ignore */ }
+  }, 3000);
+
   const PORT = config.port || 8080;
   app.listen(PORT, () => {
     console.log(`Amazon Parser server running on http://localhost:${PORT}`);

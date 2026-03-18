@@ -29,6 +29,18 @@ function saveToDisk() {
   }
 }
 
+// Reload DB from disk (to see changes from other processes like worker)
+function reloadFromDisk() {
+  if (fs.existsSync(dbPath)) {
+    // Save our pending changes first
+    if (dirty) saveToDisk();
+    const buf = fs.readFileSync(dbPath);
+    const SQL = db.constructor;
+    db.close();
+    db = new SQL(buf);
+  }
+}
+
 // --------------- Init ---------------
 
 async function init() {
@@ -307,5 +319,6 @@ module.exports = {
   updateItem,
   getStats,
   getUserByUsername,
+  reloadFromDisk,
   getDb: () => db
 };
