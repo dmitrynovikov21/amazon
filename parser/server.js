@@ -217,6 +217,7 @@ app.post('/api/jobs/:id/upload', authMiddleware, upload.single('file'), (req, re
 
     // Find SKU column: check if first row has "SKU" header
     let skuColIndex = 0;
+    let minRetailQtyColIndex = -1;
     const header = data[0];
     if (Array.isArray(header)) {
       const skuIdx = header.findIndex(
@@ -225,20 +226,36 @@ app.post('/api/jobs/:id/upload', authMiddleware, upload.single('file'), (req, re
       if (skuIdx >= 0) {
         skuColIndex = skuIdx;
       }
+
+      // Find minRetailQty column (case-insensitive search)
+      const qtyIdx = header.findIndex(
+        (h) => typeof h === 'string' && h.trim().toLowerCase().replace(/[\s_-]/g, '') === 'minretailqty'
+      );
+      if (qtyIdx >= 0) {
+        minRetailQtyColIndex = qtyIdx;
+      }
     }
 
     // Determine start row: skip header if "SKU" column was found by name
     const startRow = skuColIndex > 0 || (typeof header[0] === 'string' && header[0].trim().toUpperCase() === 'SKU') ? 1 : 0;
 
-    const skus = [];
+    const items = [];
     for (let i = startRow; i < data.length; i++) {
       const row = data[i];
       if (row && row[skuColIndex] !== undefined && row[skuColIndex] !== null && String(row[skuColIndex]).trim() !== '') {
-        skus.push(String(row[skuColIndex]).trim());
+        const sku = String(row[skuColIndex]).trim();
+        let minRetailQty = null;
+        if (minRetailQtyColIndex >= 0 && row[minRetailQtyColIndex] !== undefined && row[minRetailQtyColIndex] !== null) {
+          const parsed = parseInt(row[minRetailQtyColIndex]);
+          if (!isNaN(parsed)) {
+            minRetailQty = parsed;
+          }
+        }
+        items.push({ sku, minRetailQty });
       }
     }
 
-    if (skus.length === 0) {
+    if (items.length === 0) {
       return res.status(400).json({ error: 'No SKUs found in the file' });
     }
 
@@ -246,7 +263,7 @@ app.post('/api/jobs/:id/upload', authMiddleware, upload.single('file'), (req, re
     db.getDb().run('UPDATE jobs SET source_file = ? WHERE id = ?', [req.file.originalname, req.params.id]);
 
     // Add items to queue
-    const result = db.addItems(req.params.id, skus);
+    const result = db.addItems(req.params.id, items);
 
     // Clean up uploaded file
     try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
@@ -254,7 +271,7 @@ app.post('/api/jobs/:id/upload', authMiddleware, upload.single('file'), (req, re
     res.json({
       success: true,
       filename: req.file.originalname,
-      skus_found: skus.length,
+      skus_found: items.length,
       ...result
     });
   } catch (err) {

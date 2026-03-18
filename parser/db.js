@@ -67,6 +67,7 @@ async function init() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       job_id INTEGER NOT NULL,
       sku TEXT NOT NULL,
+      min_retail_qty INTEGER,
       status TEXT DEFAULT 'pending',
       zoro_brand TEXT, zoro_mfr_no TEXT, zoro_upc TEXT,
       zoro_title TEXT, zoro_price REAL, zoro_qty TEXT,
@@ -91,6 +92,17 @@ async function init() {
     CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status);
     CREATE INDEX IF NOT EXISTS idx_queue_job ON queue(job_id);
   `);
+
+  // Migration: add min_retail_qty column if it doesn't exist (for existing databases)
+  try {
+    db.exec("SELECT min_retail_qty FROM queue LIMIT 0");
+  } catch (e) {
+    try {
+      db.run("ALTER TABLE queue ADD COLUMN min_retail_qty INTEGER");
+    } catch (e2) {
+      // Column may already exist
+    }
+  }
 
   // Create default user if not exists
   const bcrypt = require('bcryptjs');
@@ -187,14 +199,23 @@ function deleteJob(id) {
 
 // --------------- Queue CRUD ---------------
 
-function addItems(jobId, skus) {
-  for (const sku of skus) {
-    runSql('INSERT INTO queue (job_id, sku) VALUES (?, ?)', [jobId, sku]);
+function addItems(jobId, items) {
+  // items can be an array of strings (SKUs) or an array of {sku, minRetailQty} objects
+  for (const item of items) {
+    if (typeof item === 'string') {
+      runSql('INSERT INTO queue (job_id, sku) VALUES (?, ?)', [jobId, item]);
+    } else {
+      runSql('INSERT INTO queue (job_id, sku, min_retail_qty) VALUES (?, ?, ?)', [
+        jobId,
+        item.sku,
+        item.minRetailQty != null ? item.minRetailQty : null,
+      ]);
+    }
   }
   const count = queryOne('SELECT COUNT(*) AS cnt FROM queue WHERE job_id = ?', [jobId]).cnt;
   runSql('UPDATE jobs SET total_items = ? WHERE id = ?', [count, jobId]);
   saveToDisk();
-  return { added: skus.length };
+  return { added: items.length };
 }
 
 function getItems(jobId, page, limit) {

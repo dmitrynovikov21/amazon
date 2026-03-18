@@ -692,9 +692,177 @@ async function extractAmazonProduct(page, asin) {
       });
 
       // ============================================================
-      // OTHER SELLERS
+      // OTHER SELLERS & COMPETITOR DETECTION
       // ============================================================
       result.otherSellers = getText('#olp-upd-new a, #olp_feature_div a, #buybox-see-all-buying-choices a');
+
+      // --- Seller count from "New & Used" / "Other Sellers" offers link ---
+      result.seller_count = 0;
+      const offersLinkSelectors = [
+        '#olp-upd-new a',
+        '#olp_feature_div a',
+        '#buybox-see-all-buying-choices a',
+        '#aod-ingress a',
+        '#olp-sl-new a',
+        '#olp-sl-new-used a',
+        '#moreBuyingChoices_feature_div a',
+        'a[href*="offer-listing"]',
+        '#buyboxTabularTruncate-1 a',
+      ];
+      for (const sel of offersLinkSelectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const txt = el.textContent || '';
+          const offersMatch = txt.match(/\((\d+)\)\s*(?:new|used|offer|New|Used|Offer)/i) ||
+                              txt.match(/(\d+)\s*(?:new|used|offer|New|Used|Offer)/i) ||
+                              txt.match(/\((\d+)\)/);
+          if (offersMatch) {
+            result.seller_count = parseInt(offersMatch[1], 10);
+            break;
+          }
+        }
+      }
+
+      // Also check for "Other Sellers on Amazon" section
+      const otherSellersSection = document.querySelector('#olp_feature_div, #mbc, #moreBuyingChoices_feature_div');
+      if (otherSellersSection) {
+        const otherSellerPrices = otherSellersSection.querySelectorAll('.a-price .a-offscreen, .olpOfferPrice');
+        if (otherSellerPrices.length > 0 && result.seller_count < otherSellerPrices.length) {
+          result.seller_count = otherSellerPrices.length;
+        }
+      }
+
+      // Count buybox seller too
+      if (result.soldBy && result.seller_count === 0) {
+        result.seller_count = 1;
+      } else if (result.soldBy && result.seller_count > 0) {
+        // seller_count from offers link may or may not include buybox seller; keep as-is
+      }
+
+      // --- Collect ALL seller names to determine if Amazon is among them ---
+      const allSellerNames = [];
+      if (result.soldBy) allSellerNames.push(result.soldBy);
+
+      // "Other Sellers on Amazon" box sellers
+      const mbcSellers = document.querySelectorAll('#mbc .mbcMerchantName, #moreBuyingChoices_feature_div .a-button-text');
+      mbcSellers.forEach(el => {
+        const name = el.textContent.trim();
+        if (name && name.length > 1 && !name.toLowerCase().includes('add to cart')) {
+          allSellerNames.push(name);
+        }
+      });
+
+      // Ships from and sold by text
+      const merchantInfoText = getText('#merchant-info') || '';
+      if (merchantInfoText) allSellerNames.push(merchantInfoText);
+      const shipsAndSoldText = getText('#tabular-buybox') || '';
+      if (shipsAndSoldText) allSellerNames.push(shipsAndSoldText);
+
+      // Check "fulfilled by Amazon" / "sold by Amazon" patterns in buybox area
+      const buyboxArea = document.querySelector('#buyBoxAccordion, #desktop_buybox, #newAccordionRow, #buybox');
+      if (buyboxArea) {
+        allSellerNames.push(buyboxArea.textContent || '');
+      }
+
+      // Determine competitor_amazon
+      const amazonSellerPatterns = [
+        /amazon\.com/i,
+        /amazon\.com\s*services/i,
+        /ships from and sold by amazon/i,
+        /sold by[:\s]*amazon/i,
+      ];
+      const isAmazonSeller = allSellerNames.some(name =>
+        amazonSellerPatterns.some(pat => pat.test(name))
+      );
+
+      if (allSellerNames.length === 0 && !result.otherSellers) {
+        result.competitor_amazon = 'Нет конкурента';
+      } else if (isAmazonSeller) {
+        result.competitor_amazon = 'Да';
+      } else {
+        result.competitor_amazon = 'Нет';
+      }
+
+      // --- Buybox seller name ---
+      result.amazon_seller = result.soldBy || '';
+
+      // --- Lowest price (amazon_price) ---
+      // Collect all visible prices: buybox price + other seller prices
+      const allPrices = [];
+      // Buybox price
+      if (result.price) {
+        const buyboxNum = parseFloat(result.price.replace(/[^0-9.]/g, ''));
+        if (!isNaN(buyboxNum)) allPrices.push(buyboxNum);
+      }
+      // Other sellers prices
+      if (otherSellersSection) {
+        otherSellersSection.querySelectorAll('.a-price .a-offscreen, .olpOfferPrice').forEach(el => {
+          const pText = el.textContent.replace(/[^0-9.]/g, '');
+          const pNum = parseFloat(pText);
+          if (!isNaN(pNum) && pNum > 0) allPrices.push(pNum);
+        });
+      }
+      // "New & Used" / offers section
+      const aodPrices = document.querySelectorAll('#aod-offer-list .a-price .a-offscreen, #all-offers-display .a-price .a-offscreen');
+      aodPrices.forEach(el => {
+        const pText = el.textContent.replace(/[^0-9.]/g, '');
+        const pNum = parseFloat(pText);
+        if (!isNaN(pNum) && pNum > 0) allPrices.push(pNum);
+      });
+
+      result.amazon_price = allPrices.length > 0 ? Math.min(...allPrices) : null;
+
+      // ============================================================
+      // AMAZON QTY (pack size from title and product details)
+      // ============================================================
+      result.amazon_qty = 1; // default: sold individually
+
+      // Check title for pack size patterns
+      const qtyPatterns = [
+        /pack\s+of\s+(\d+)/i,
+        /(\d+)\s*[-\s]pack\b/i,
+        /(\d+)\s*[-\s]count\b/i,
+        /set\s+of\s+(\d+)/i,
+        /(\d+)\s*[-\s]piece\b/i,
+        /\b(\d+)\s*ct\b/i,
+        /\bqty\s*[:of]*\s*(\d+)/i,
+        /\((\d+)\s*pack\)/i,
+        /\((\d+)\s*count\)/i,
+      ];
+      let qtyFound = false;
+      for (const pat of qtyPatterns) {
+        const m = (result.title || '').match(pat);
+        if (m) {
+          const num = parseInt(m[1], 10);
+          if (num > 0 && num < 10000) {
+            result.amazon_qty = num;
+            qtyFound = true;
+            break;
+          }
+        }
+      }
+
+      // If not found in title, check product details
+      if (!qtyFound) {
+        const qtyDetailKeys = ['number of items', 'item package quantity', 'unit count'];
+        for (const detailKey of Object.keys(result.details)) {
+          const lowerKey = detailKey.toLowerCase();
+          for (const qtyKey of qtyDetailKeys) {
+            if (lowerKey.includes(qtyKey)) {
+              const valMatch = result.details[detailKey].match(/(\d+)/);
+              if (valMatch) {
+                const num = parseInt(valMatch[1], 10);
+                if (num > 0 && num < 10000) {
+                  result.amazon_qty = num;
+                  qtyFound = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (qtyFound) break;
+        }
+      }
 
       // ============================================================
       // A+ CONTENT / FROM THE MANUFACTURER
@@ -736,7 +904,8 @@ async function extractAmazonProduct(page, asin) {
 
     console.log(`[AMZ-EXTRACT] Extracted: "${(data.title || '').substring(0, 60)}..." | Price: ${data.price} | Rating: ${data.rating}`);
     console.log(`[AMZ-EXTRACT] Details: ${Object.keys(data.details).length} keys | Images: ${data.images.length} | Bullets: ${data.featureBullets.length}`);
-    console.log(`[AMZ-EXTRACT] BSR: ${data.bsr ? data.bsr.substring(0, 80) : 'N/A'} | Seller: ${data.soldBy || 'N/A'}`);
+    console.log(`[AMZ-EXTRACT] BSR: ${data.bsr ? data.bsr.substring(0, 80) : 'N/A'} | Seller: ${data.amazon_seller || 'N/A'}`);
+    console.log(`[AMZ-EXTRACT] Qty: ${data.amazon_qty} | Competitor: ${data.competitor_amazon} | Lowest Price: ${data.amazon_price} | Sellers: ${data.seller_count}`);
 
     return data;
 

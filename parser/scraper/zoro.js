@@ -201,6 +201,36 @@ function parseProductPage(html, pageUrl) {
   }
 
   // --- Price ---
+  // Prefer the original/list price (before discount), not the sale price.
+  // Look for "Was $X.XX", strikethrough prices, or original-price markers first.
+  let regularPrice = null;
+  let anyPrice = null;
+
+  // 1. "Was $X.XX" or "Was: $X.XX" patterns (original price before discount)
+  const wasMatch = html.match(/Was\s*:?\s*\$\s*([\d,]+\.\d{2})/i);
+  if (wasMatch) {
+    regularPrice = parseFloat(wasMatch[1].replace(/,/g, ''));
+  }
+
+  // 2. Strikethrough / line-through price (original price that's been crossed out)
+  if (!regularPrice) {
+    const strikePatterns = [
+      /<(?:s|strike|del)[^>]*>\s*\$?\s*([\d,]+\.\d{2})\s*<\/(?:s|strike|del)>/i,
+      /text-decoration\s*:\s*line-through[^>]*>\s*\$?\s*([\d,]+\.\d{2})/i,
+      /line-through[^>]*>\s*\$?\s*([\d,]+\.\d{2})/i,
+      /class="[^"]*(?:original|regular|list|was|old|strike)[^"]*price[^"]*"[^>]*>\s*\$?\s*([\d,]+\.\d{2})/i,
+      /class="[^"]*price[^"]*(?:original|regular|list|was|old|strike)[^"]*"[^>]*>\s*\$?\s*([\d,]+\.\d{2})/i,
+    ];
+    for (const pattern of strikePatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        regularPrice = parseFloat(match[1].replace(/,/g, ''));
+        if (regularPrice > 0) break;
+      }
+    }
+  }
+
+  // 3. Fall back to any price on the page
   const pricePatterns = [
     /"price"\s*:\s*"?([\d,.]+)"?/i,
     /itemprop="price"[^>]*content="([\d,.]+)"/i,
@@ -211,25 +241,76 @@ function parseProductPage(html, pageUrl) {
   for (const pattern of pricePatterns) {
     const match = html.match(pattern);
     if (match) {
-      result.price = parseFloat(match[1].replace(/,/g, ''));
-      if (result.price > 0) break;
+      anyPrice = parseFloat(match[1].replace(/,/g, ''));
+      if (anyPrice > 0) break;
     }
   }
 
-  // --- Qty / Availability ---
-  const qtyPatterns = [
-    /(?:In Stock|Available|Availability)\s*:?\s*([^<\n]+)/i,
-    /"availability"\s*:\s*"([^"]+)"/i,
-    /itemprop="availability"[^>]*content="([^"]+)"/i,
+  // Use regular/list price if found, otherwise fall back to whatever price is on the page
+  result.price = (regularPrice && regularPrice > 0) ? regularPrice : anyPrice;
+
+  // --- Qty (Pack Size) ---
+  // Extract the number of items per unit of sale, NOT availability/stock status.
+  // Default to 1 (sold individually) if no pack info found.
+  let packQty = null;
+
+  // 1. Check the product title for pack-size patterns
+  const titleText = result.title || '';
+  const titleQtyPatterns = [
+    /\bPK[- ]?(\d+)\b/i,                     // PK-4, PK 4, PK4
+    /\b(\d+)[- ]?(?:PK|Pk)\b/,               // 4-PK, 4 Pk, 4PK
+    /\bPack\s+of\s+(\d+)\b/i,                // Pack of 4
+    /\b(\d+)[- ]?Pack\b/i,                   // 4-Pack, 4 Pack, 4Pack
+    /\bBox\s+of\s+(\d+)\b/i,                 // Box of 12
+    /\b(\d+)\s*\/\s*(?:Pack|Pk|Box)\b/i,     // 12/Pack, 12/Pk, 12/Box
+    /\b(\d+)\s*(?:per|\/)\s*(?:pack|pk|box|case|set)\b/i, // 12 per pack
   ];
 
-  for (const pattern of qtyPatterns) {
-    const match = html.match(pattern);
+  for (const pattern of titleQtyPatterns) {
+    const match = titleText.match(pattern);
     if (match) {
-      result.qty = stripTags(match[1]).trim();
-      break;
+      packQty = parseInt(match[1], 10);
+      if (packQty > 0) break;
     }
   }
+
+  // 2. Check product specs/details for "Quantity" or "Package Quantity"
+  if (!packQty) {
+    const specQtyPatterns = [
+      /(?:Package\s+)?Quantity\s*<\/(?:dt|th|td|span|div)[^>]*>\s*<(?:dd|td|span|div)[^>]*>\s*(?:<[^>]*>)*\s*(\d+)/i,
+      /(?:Package\s+)?Quantity\s*:?\s*(?:<[^>]*>)*\s*(\d+)/i,
+      /Items\s*(?:per|in)\s*(?:Package|Pack|Each)\s*<\/(?:dt|th|td|span|div)[^>]*>\s*<(?:dd|td|span|div)[^>]*>\s*(?:<[^>]*>)*\s*(\d+)/i,
+      /Items\s*(?:per|in)\s*(?:Package|Pack|Each)\s*:?\s*(?:<[^>]*>)*\s*(\d+)/i,
+    ];
+
+    for (const pattern of specQtyPatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        packQty = parseInt(match[1], 10);
+        if (packQty > 0) break;
+      }
+    }
+  }
+
+  // 3. Check for "Sold in packs of X" or similar text
+  if (!packQty) {
+    const soldInPatterns = [
+      /Sold\s+in\s+(?:packs|boxes|sets|cases)\s+of\s+(\d+)/i,
+      /Comes\s+in\s+(?:a\s+)?(?:pack|box|set|case)\s+of\s+(\d+)/i,
+      /(\d+)\s+(?:per|in\s+a?)\s+(?:pack|box|set|case)\b/i,
+    ];
+
+    for (const pattern of soldInPatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        packQty = parseInt(match[1], 10);
+        if (packQty > 0) break;
+      }
+    }
+  }
+
+  // 4. Default to 1 if no pack info found
+  result.qty = (packQty && packQty > 0) ? packQty : 1;
 
   // --- Image URL ---
   // og:image meta tag
@@ -329,14 +410,24 @@ function enrichFromJsonLd(product, jsonLdList) {
       product.imageUrl = typeof item.image === 'string' ? item.image : (Array.isArray(item.image) ? item.image[0] : item.image.url);
     }
 
+    // Extract pack quantity from JSON-LD if not already set from title/specs
+    if (product.qty === 1) {
+      // Check for quantity-related properties in JSON-LD
+      const jsonQty = item.quantity || item.packageQuantity || item.numberOfItems
+        || (item.additionalProperty && Array.isArray(item.additionalProperty)
+          && item.additionalProperty.find(p => /quantity|pack/i.test(p.name || ''))
+          && parseInt(item.additionalProperty.find(p => /quantity|pack/i.test(p.name || '')).value, 10));
+      if (jsonQty && parseInt(jsonQty, 10) > 0) {
+        product.qty = parseInt(jsonQty, 10);
+      }
+    }
+
     if (item.offers) {
       const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
       if (!product.price && offer.price) {
         product.price = parseFloat(offer.price);
       }
-      if (!product.qty && offer.availability) {
-        product.qty = offer.availability.replace('https://schema.org/', '').replace('http://schema.org/', '');
-      }
+      // Do NOT overwrite qty with availability — qty is pack size, not stock status
     }
   }
 

@@ -147,36 +147,66 @@ function runAIAnalysis(zoroData, amazonData) {
  * Build the analysis prompt from parsed data.
  */
 function buildAnalysisPrompt(zoroData, amazonData) {
-  return `Analyze this product for Amazon selling potential. Answer in Russian.
+  const amazonPrice = parsePrice(amazonData.price);
+  const zoroPrice = zoroData.price;
+  const zoroQty = parseInt(zoroData.qty) || 1;
+  const amazonQty = parseInt(amazonData.maxQty) || parseInt(amazonData.availability) || 1;
+  const effectiveCost = (zoroPrice && amazonQty && zoroQty) ? (zoroPrice * (amazonQty / zoroQty)) : null;
+  const margin = (amazonPrice && effectiveCost) ? (((amazonPrice - effectiveCost) / amazonPrice) * 100).toFixed(1) : 'N/A';
+  const referralFee = amazonPrice ? (amazonPrice * 0.15).toFixed(2) : 'N/A';
 
-ZORO DATA:
-- Title: ${zoroData.title || 'N/A'}
-- Brand: ${zoroData.brand || 'N/A'}
-- MfrNo: ${zoroData.mfrNo || 'N/A'}
-- Price: $${zoroData.price || 'N/A'}
+  return `Ты — аналитик товаров для продажи на Amazon. Проанализируй данные ниже и ответь СТРОГО в формате JSON. Отвечай на русском языке.
 
-AMAZON DATA:
+=== ДАННЫЕ ПОСТАВЩИКА (ZORO) ===
+- Название: ${zoroData.title || 'N/A'}
+- Бренд: ${zoroData.brand || 'N/A'}
+- MFR номер: ${zoroData.mfrNo || 'N/A'}
+- UPC: ${zoroData.upc || 'N/A'}
+- Цена: $${zoroData.price || 'N/A'}
+- Кол-во в упаковке: ${zoroQty}
+- URL изображения: ${zoroData.imageUrl || 'N/A'}
+
+=== ДАННЫЕ AMAZON ===
 - ASIN: ${amazonData.asin}
-- Title: ${amazonData.title || 'N/A'}
-- Price: ${amazonData.price || 'N/A'}
-- Seller: ${amazonData.soldBy || amazonData.sellerLink || 'N/A'}
-- Rating: ${amazonData.rating || 'N/A'}
-- Reviews: ${amazonData.reviewCount || 'N/A'}
+- Название: ${amazonData.title || 'N/A'}
+- Бренд: ${amazonData.brand || 'N/A'}
+- Цена: ${amazonData.price || 'N/A'}
+- Кол-во в упаковке: ${amazonQty}
+- Продавец (BuyBox): ${amazonData.soldBy || amazonData.sellerLink || 'N/A'}
+- Рейтинг: ${amazonData.rating || 'N/A'}
+- Кол-во отзывов: ${amazonData.reviewCount || 'N/A'}
 - BSR: ${amazonData.bsr || 'N/A'}
-- Dimensions: ${amazonData.dimensions || 'N/A'}
-- Weight: ${amazonData.weight || 'N/A'}
-- Minority-Owned: ${amazonData.badges?.minorityOwned ? 'YES' : 'NO'}
-- Badges: ${JSON.stringify(amazonData.badges || {})}
+- Размеры: ${amazonData.dimensions || 'N/A'}
+- Вес: ${amazonData.weight || 'N/A'}
+- Бейджи: ${JSON.stringify(amazonData.badges || {})}
+- Описание/буллеты: ${(amazonData.featureBullets || []).slice(0, 3).join('; ') || 'N/A'}
+- Детали: ${JSON.stringify(amazonData.details || {}).substring(0, 500)}
 
-RULES:
-1. If margin < 20% -> НЕ ЗАХОДИТЬ
-2. If oversized (volume > 550 cubic inches) -> НЕ ЗАХОДИТЬ
-3. If rating < 3.5 -> НЕ ЗАХОДИТЬ
-4. If seller IS the brand -> НЕ ЗАХОДИТЬ (brand protection risk)
-5. Otherwise -> ЗАХОДИТЬ
+=== ЧАСТЬ 4: СРАВНЕНИЕ ТОВАРОВ ===
+Сравни UPC, бренд, MFR номер, цвет, размер, комплектацию между Zoro и Amazon.
+Определи совпадения и несовпадения.
 
-Give a verdict: ЗАХОДИТЬ or НЕ ЗАХОДИТЬ, with brief explanation.
-Format: VERDICT: [ЗАХОДИТЬ/НЕ ЗАХОДИТЬ] | REASON: [brief reason]`;
+=== ЧАСТЬ 5: СРАВНЕНИЕ ФОТО ===
+Если доступны URL изображений, сравни визуально товары. Совпадает ли внешний вид?
+
+=== ЧАСТЬ 6: АНАЛИЗ ЦЕНЫ И МАРЖИ ===
+- Цена Amazon: ${amazonData.price || 'N/A'}
+- Себестоимость (Zoro): $${zoroPrice || 'N/A'}
+- Эффективная стоимость (с учётом кол-ва): $${effectiveCost ? effectiveCost.toFixed(2) : 'N/A'}
+- Комиссия Amazon (referral ~15%): $${referralFee}
+- Примерная стоимость FBA/FBM: оцени по весу/размерам
+- Маржа: ${margin}%
+
+=== ЧАСТЬ 7: ИТОГОВЫЙ ВЕРДИКТ ===
+Дай финальную рекомендацию: ЗАХОДИТЬ или НЕ ЗАХОДИТЬ, с подробным объяснением.
+
+Ответь СТРОГО в формате JSON (без markdown, без \`\`\`):
+{
+  "photo_match": "Да/Нет/Частично",
+  "comparison": "подробный текст о том что совпадает и что нет (UPC, бренд, MFR, цвет, размер, комплектация)",
+  "recommendation": "ЗАХОДИТЬ/НЕ ЗАХОДИТЬ",
+  "reason": "подробное объяснение причины рекомендации"
+}`;
 }
 
 // ============================================================
@@ -331,29 +361,40 @@ async function processItem(item) {
       return;
     }
 
-    // Parse prices and calculate margin
+    // Parse prices
     const amazonPrice = parsePrice(amazonData.price);
     const zoroPrice = zoroData.price;
+
+    // Parse quantities as numbers
+    const zoroQty = parseInt(zoroData.qty) || 1;
+    const amazonQty = parseInt(amazonData.maxQty) || parseInt(amazonData.availability) || 1;
+
+    // Calculate margin accounting for qty difference:
+    // If Amazon sells pack of 6 and Zoro sells individually,
+    // we need to buy 6 from Zoro to fulfill 1 Amazon order
     let marginPercent = null;
+    let effectiveCost = null;
     if (amazonPrice && zoroPrice && amazonPrice > 0) {
-      marginPercent = Math.round(((amazonPrice - zoroPrice) / amazonPrice) * 100 * 10) / 10;
+      effectiveCost = zoroPrice * (amazonQty / zoroQty);
+      marginPercent = Math.round(((amazonPrice - effectiveCost) / amazonPrice) * 100 * 10) / 10;
     }
 
-    // Determine seller-is-brand
+    // Determine seller-is-brand: check if buybox seller name contains the brand name (case insensitive)
     const seller = amazonData.soldBy || amazonData.sellerLink || '';
     const brand = zoroData.brand || amazonData.brand || '';
     const isSellerBrand = sellerIsBrand(seller, brand);
 
-    // Determine if Amazon is selling
+    // competitor_amazon: use the value from amazon-extract.js directly
+    // amazonData now returns competitor_amazon as "Да"/"Нет"/"Нет конкурента"
+    // Determine if Amazon itself is selling (for hard rule)
     const sellerLower = seller.toLowerCase();
     const isAmazonSeller = sellerLower.includes('amazon.com') || sellerLower === 'amazon';
-
-    // Competitor classification
+    // Use "Да" if Amazon sells, "Нет" if there's a 3P seller, "Нет конкурента" if no seller
     let competitorAmazon = 'Нет';
     if (isAmazonSeller) {
-      competitorAmazon = 'Да, Amazon';
-    } else if (seller) {
-      competitorAmazon = 'Да, 3P';
+      competitorAmazon = 'Да';
+    } else if (!seller || seller.trim() === '') {
+      competitorAmazon = 'Нет конкурента';
     }
 
     // Oversized check
@@ -366,12 +407,6 @@ async function processItem(item) {
       if (volume > 550) oversizedStatus = 'Да';
       else if (volume > 450) oversizedStatus = 'Пограничный';
     }
-    // Check pack size multiplier
-    const sizeDetail = amazonData.details?.['Size'] || '';
-    const packMatch = sizeDetail.match(/Pack of (\d+)/i);
-    if (packMatch && parseInt(packMatch[1]) > 1) {
-      oversizedStatus = 'Да';
-    }
 
     // Minority-owned badge
     const minorityOwned = amazonData.badges?.minorityOwned ? 'Да' : 'Нет';
@@ -382,7 +417,7 @@ async function processItem(item) {
       amazon_title: amazonData.title || null,
       amazon_price: amazonPrice,
       amazon_seller: seller || null,
-      amazon_qty: amazonData.maxQty || amazonData.availability || null,
+      amazon_qty: amazonQty,
       amazon_rating: parseFloat(amazonData.rating) || null,
       amazon_review_count: parseInt((amazonData.reviewCount || '').replace(/[^0-9]/g, '')) || null,
       amazon_bsr: amazonData.bsr || null,
@@ -397,7 +432,7 @@ async function processItem(item) {
     });
 
     log(jobId, itemId, 'INFO',
-      `Amazon: $${amazonPrice || '?'} | Margin: ${marginPercent || '?'}% | Seller: ${seller || '?'} | Oversized: ${oversizedStatus}`);
+      `Amazon: $${amazonPrice || '?'} | Margin: ${marginPercent || '?'}% | Effective cost: $${effectiveCost || '?'} | Seller: ${seller || '?'} | Oversized: ${oversizedStatus}`);
 
     // Download Amazon main image
     if (amazonData.images?.[0]) {
@@ -422,12 +457,17 @@ async function processItem(item) {
     let aiResult = { model: 'rules', result: '' };
 
     // Hard rules first (these override AI)
-    if (marginPercent !== null && marginPercent < 20) {
+    if (competitorAmazon === 'Да') {
+      // Amazon sells this product itself -> hard НЕ ЗАХОДИТЬ
       recommendation = 'НЕ ЗАХОДИТЬ';
-      aiResult.result = `Маржа слишком низкая: ${marginPercent}%`;
-    } else if (isAmazonSeller) {
+      aiResult.result = 'Amazon продает этот товар сам (competitor_amazon = Да)';
+    } else if (zoroQty > amazonQty) {
+      // Supplier qty is bigger than Amazon qty -> НЕ ЗАХОДИТЬ
       recommendation = 'НЕ ЗАХОДИТЬ';
-      aiResult.result = 'Amazon продает этот товар сам';
+      aiResult.result = `Кол-во у поставщика больше чем на Amazon (Zoro: ${zoroQty}, Amazon: ${amazonQty})`;
+    } else if (marginPercent !== null && marginPercent < 20) {
+      recommendation = 'НЕ ЗАХОДИТЬ';
+      aiResult.result = `Маржа слишком низкая: ${marginPercent}% (эффективная стоимость: $${effectiveCost?.toFixed(2)})`;
     } else if (oversizedStatus === 'Да') {
       recommendation = 'НЕ ЗАХОДИТЬ';
       aiResult.result = 'Габаритный товар (объем > 550 куб. дюймов)';
@@ -441,16 +481,38 @@ async function processItem(item) {
       // All hard rules passed -> try AI analysis for a more nuanced verdict
       try {
         aiResult = runAIAnalysis(zoroData, amazonData);
-        // Parse verdict from AI response
-        const verdictMatch = aiResult.result.match(/VERDICT:\s*(ЗАХОДИТЬ|НЕ ЗАХОДИТЬ)/i);
-        if (verdictMatch) {
-          recommendation = verdictMatch[1];
-        } else if (aiResult.result.includes('НЕ ЗАХОДИТЬ')) {
-          recommendation = 'НЕ ЗАХОДИТЬ';
-        } else if (aiResult.result.includes('ЗАХОДИТЬ')) {
-          recommendation = 'ЗАХОДИТЬ';
+        // Parse JSON response from AI
+        let aiJson = null;
+        try {
+          // Try to extract JSON from the response (may have surrounding text)
+          const jsonMatch = aiResult.result.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            aiJson = JSON.parse(jsonMatch[0]);
+          }
+        } catch (parseErr) {
+          log(jobId, itemId, 'WARN', `AI JSON parse failed: ${parseErr.message}`);
+        }
+
+        if (aiJson && aiJson.recommendation) {
+          if (aiJson.recommendation.includes('НЕ ЗАХОДИТЬ')) {
+            recommendation = 'НЕ ЗАХОДИТЬ';
+          } else if (aiJson.recommendation.includes('ЗАХОДИТЬ')) {
+            recommendation = 'ЗАХОДИТЬ';
+          }
+          // Store structured fields
+          aiResult.photoMatch = aiJson.photo_match || null;
+          aiResult.comparison = aiJson.comparison || null;
+          aiResult.reason = aiJson.reason || null;
+          aiResult.result = aiJson.reason || aiResult.result;
         } else {
-          recommendation = 'ЗАХОДИТЬ'; // Default if all rules passed
+          // Fallback: try to parse old format or keywords
+          if (aiResult.result.includes('НЕ ЗАХОДИТЬ')) {
+            recommendation = 'НЕ ЗАХОДИТЬ';
+          } else if (aiResult.result.includes('ЗАХОДИТЬ')) {
+            recommendation = 'ЗАХОДИТЬ';
+          } else {
+            recommendation = 'ЗАХОДИТЬ'; // Default if all rules passed
+          }
         }
       } catch (e) {
         log(jobId, itemId, 'WARN', `AI analysis failed: ${e.message}`);
@@ -464,8 +526,9 @@ async function processItem(item) {
       status: 'done',
       recommendation,
       ai_model: aiResult.model || null,
-      ai_analysis: (aiResult.result || '').substring(0, 2000),
-      ai_recommendation_reason: (aiResult.result || '').substring(0, 500),
+      ai_photo_match: aiResult.photoMatch || null,
+      ai_analysis: (aiResult.comparison || aiResult.result || '').substring(0, 2000),
+      ai_recommendation_reason: (aiResult.reason || aiResult.result || '').substring(0, 500),
       updated_at: new Date().toISOString(),
     });
 
