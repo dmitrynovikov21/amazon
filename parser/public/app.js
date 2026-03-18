@@ -38,6 +38,7 @@ const App = (function () {
     if (route === 'dashboard') window.location.hash = '#dashboard';
     else if (route === 'job') window.location.hash = '#job/' + id;
     else if (route === 'item') window.location.hash = '#job/' + id + '/item/' + subId;
+    else if (route === 'admin') window.location.hash = '#admin';
   }
 
   function handleRoute() {
@@ -46,7 +47,10 @@ const App = (function () {
     stopPolling();
     hideAllViews();
 
-    if (parts[0] === 'job' && parts[2] === 'item' && parts[3]) {
+    if (parts[0] === 'admin') {
+      showView('admin');
+      loadAdmin();
+    } else if (parts[0] === 'job' && parts[2] === 'item' && parts[3]) {
       currentJobId = parts[1];
       showView('item');
       loadItemDetail(parts[1], parts[3]);
@@ -397,6 +401,135 @@ const App = (function () {
     setTimeout(() => { el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(()=>el.remove(),300); }, 4000);
   }
 
+  // ---- Admin ----
+  async function loadAdmin() {
+    try {
+      const [status, logsData] = await Promise.all([
+        api('/api/admin/status'),
+        api('/api/admin/logs'),
+      ]);
+
+      // Fill status cards
+      setText('adm-uptime', status.server.uptimeStr || '-');
+      setText('adm-pid', status.server.pid || '-');
+      setText('adm-node', status.server.nodeVersion || '-');
+      setText('adm-platform', (status.server.platform || '-') + ' / ' + (status.server.hostname || ''));
+      setText('adm-mem-sys', fmtBytes(status.memory.used) + ' / ' + fmtBytes(status.memory.total));
+      setText('adm-mem-proc', fmtBytes(status.memory.processRss));
+      setText('adm-db-size', status.db.sizeStr || '-');
+
+      const workerEl = document.getElementById('adm-worker');
+      if (workerEl) {
+        if (status.worker.running) {
+          workerEl.innerHTML = '<span style="color:var(--success)">Running</span> <span style="color:var(--text-muted);font-size:.8rem">(PID: ' + status.worker.pid + ')</span>';
+        } else {
+          workerEl.innerHTML = '<span style="color:var(--danger)">Stopped</span>';
+        }
+      }
+
+      setText('admCdpEndpoint', status.config.cdpEndpoint || '-');
+
+      // Fill log file select
+      const sel = document.getElementById('logFileSelect');
+      if (sel && logsData.files) {
+        const current = sel.value;
+        sel.innerHTML = '<option value="">-- Select log file --</option>';
+        for (const f of logsData.files) {
+          const opt = document.createElement('option');
+          opt.value = f.name;
+          opt.textContent = f.name + ' (' + f.sizeStr + ')';
+          sel.appendChild(opt);
+        }
+        // Auto-select first (most recent) log or restore previous
+        if (current && logsData.files.some(f => f.name === current)) {
+          sel.value = current;
+        } else if (logsData.files.length > 0) {
+          sel.value = logsData.files[0].name;
+        }
+        // Auto-load if a file is selected
+        if (sel.value) adminLoadLog();
+      }
+
+      // Check browser
+      adminCheckBrowser();
+    } catch (err) {
+      console.error('Admin load error:', err);
+    }
+  }
+
+  async function adminCheckBrowser() {
+    const cd = document.getElementById('admChromeDot');
+    const sd = document.getElementById('admScDot');
+    if (!cd || !sd) return;
+    cd.className = 'status-dot yellow';
+    sd.className = 'status-dot yellow';
+    try {
+      const s = await api('/api/status/browser');
+      cd.className = 'status-dot ' + (s.chrome ? 'green' : 'red');
+      sd.className = 'status-dot ' + (s.sellerCentral ? 'green' : 'red');
+    } catch (e) {
+      cd.className = 'status-dot red';
+      sd.className = 'status-dot red';
+    }
+  }
+
+  async function adminCmd(command) {
+    const el = document.getElementById('adminCmdResult');
+    el.style.display = 'block';
+    el.className = 'admin-cmd-result';
+    el.textContent = 'Executing...';
+    try {
+      const res = await api('/api/admin/command', {
+        method: 'POST',
+        body: JSON.stringify({ command }),
+      });
+      el.className = 'admin-cmd-result ' + (res.success ? 'result-success' : 'result-error');
+      el.textContent = res.message || (res.success ? 'Done' : 'Failed');
+      toast(res.message, res.success ? 'success' : 'error');
+      // Refresh status after command
+      setTimeout(loadAdmin, 1500);
+    } catch (err) {
+      el.className = 'admin-cmd-result result-error';
+      el.textContent = 'Error: ' + err.message;
+      toast(err.message, 'error');
+    }
+  }
+
+  async function adminLoadLog() {
+    const sel = document.getElementById('logFileSelect');
+    const content = document.getElementById('adminLogContent');
+    if (!sel || !sel.value) {
+      content.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">Select a log file to view</div>';
+      return;
+    }
+    content.textContent = 'Loading...';
+    try {
+      const data = await api('/api/admin/logs?file=' + encodeURIComponent(sel.value) + '&lines=300');
+      // Colorize log lines
+      const lines = (data.lines || '').split('\n');
+      content.innerHTML = lines.map(line => {
+        if (line.includes('[ERROR]')) return '<span class="log-error">' + esc(line) + '</span>';
+        if (line.includes('[WARN]')) return '<span class="log-warn">' + esc(line) + '</span>';
+        if (line.includes('[INFO]')) return '<span class="log-info">' + esc(line) + '</span>';
+        return esc(line);
+      }).join('\n');
+      // Auto scroll to bottom
+      if (document.getElementById('logAutoScroll')?.checked) {
+        content.scrollTop = content.scrollHeight;
+      }
+    } catch (err) {
+      content.textContent = 'Error loading log: ' + err.message;
+    }
+  }
+
+  function fmtBytes(b) {
+    if (!b || b === 0) return '0 B';
+    const k = 1024;
+    const s = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(b) / Math.log(k));
+    return (b / Math.pow(k, i)).toFixed(1) + ' ' + s[i];
+  }
+
   // ---- Init ----
   function init() {
     if (!getToken()) { goLogin(); return; }
@@ -425,5 +558,5 @@ const App = (function () {
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { navigate, logout: goLogin, openNewJobModal, closeNewJobModal, createJob, deleteJob, doJobAction, jobAction, exportJob, goPage, loadDashboard, loadJobDetail, checkBrowser: checkBrowserStatus };
+  return { navigate, logout: goLogin, openNewJobModal, closeNewJobModal, createJob, deleteJob, doJobAction, jobAction, exportJob, goPage, loadDashboard, loadJobDetail, checkBrowser: checkBrowserStatus, adminCheckBrowser, adminCmd, adminLoadLog };
 })();

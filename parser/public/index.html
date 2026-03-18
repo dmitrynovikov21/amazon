@@ -14,6 +14,7 @@
       Amazon Parser
     </div>
     <div class="navbar-actions">
+      <button class="btn btn-outline btn-sm" onclick="App.navigate('admin')" style="margin-right:4px">Admin</button>
       <button class="btn btn-outline btn-sm" onclick="App.logout()">Logout</button>
     </div>
   </nav>
@@ -125,6 +126,146 @@
       </div>
       <div id="itemDetailContent">
         <div class="loading-overlay"><span class="spinner spinner-lg"></span><span>Loading item...</span></div>
+      </div>
+    </div>
+
+    <!-- Admin View -->
+    <div id="view-admin" class="view" style="display:none;">
+      <div class="breadcrumb">
+        <a href="#dashboard" onclick="App.navigate('dashboard'); return false;">Dashboard</a>
+        <span class="separator">/</span>
+        <span class="current">Admin Panel</span>
+      </div>
+
+      <!-- System Status -->
+      <div class="admin-section">
+        <h3>System Status</h3>
+        <div class="admin-status-grid" id="adminStatusGrid">
+          <div class="admin-status-card">
+            <div class="admin-status-label">Server Uptime</div>
+            <div class="admin-status-value" id="adm-uptime">-</div>
+          </div>
+          <div class="admin-status-card">
+            <div class="admin-status-label">Server PID</div>
+            <div class="admin-status-value" id="adm-pid">-</div>
+          </div>
+          <div class="admin-status-card">
+            <div class="admin-status-label">Node.js</div>
+            <div class="admin-status-value" id="adm-node">-</div>
+          </div>
+          <div class="admin-status-card">
+            <div class="admin-status-label">Platform</div>
+            <div class="admin-status-value" id="adm-platform">-</div>
+          </div>
+          <div class="admin-status-card">
+            <div class="admin-status-label">Memory (System)</div>
+            <div class="admin-status-value" id="adm-mem-sys">-</div>
+          </div>
+          <div class="admin-status-card">
+            <div class="admin-status-label">Memory (Server)</div>
+            <div class="admin-status-value" id="adm-mem-proc">-</div>
+          </div>
+          <div class="admin-status-card">
+            <div class="admin-status-label">Database Size</div>
+            <div class="admin-status-value" id="adm-db-size">-</div>
+          </div>
+          <div class="admin-status-card">
+            <div class="admin-status-label">Worker</div>
+            <div class="admin-status-value" id="adm-worker">-</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Browser Status -->
+      <div class="admin-section">
+        <h3>Browser / CDP</h3>
+        <div class="browser-status" id="adminBrowserStatus" style="margin-bottom:0">
+          <div class="status-item">
+            <span class="status-dot" id="admChromeDot"></span>
+            <span>Chrome CDP</span>
+          </div>
+          <div class="status-item">
+            <span class="status-dot" id="admScDot"></span>
+            <span>Seller Central</span>
+          </div>
+          <div class="status-item" style="color:var(--text-muted);font-size:12px" id="admCdpEndpoint">-</div>
+          <button class="btn btn-sm btn-outline" onclick="App.adminCheckBrowser()">Check</button>
+        </div>
+      </div>
+
+      <!-- Process Control -->
+      <div class="admin-section">
+        <h3>Process Control</h3>
+        <div class="admin-commands">
+          <div class="admin-cmd-group">
+            <h4>Worker</h4>
+            <div class="btn-group">
+              <button class="btn btn-success btn-sm" onclick="App.adminCmd('start-worker')">Start Worker</button>
+              <button class="btn btn-danger btn-sm" onclick="App.adminCmd('stop-worker')">Stop Worker</button>
+            </div>
+          </div>
+          <div class="admin-cmd-group">
+            <h4>Chrome Browser</h4>
+            <div class="btn-group">
+              <button class="btn btn-success btn-sm" onclick="App.adminCmd('start-chrome')">Start Chrome</button>
+              <button class="btn btn-danger btn-sm" onclick="App.adminCmd('stop-chrome')">Stop Chrome</button>
+            </div>
+          </div>
+          <div class="admin-cmd-group">
+            <h4>Database</h4>
+            <div class="btn-group">
+              <button class="btn btn-info btn-sm" onclick="App.adminCmd('save-db')">Save DB to Disk</button>
+              <button class="btn btn-info btn-sm" onclick="App.adminCmd('db-backup')">Create Backup</button>
+            </div>
+          </div>
+          <div class="admin-cmd-group">
+            <h4>Logs</h4>
+            <div class="btn-group">
+              <button class="btn btn-warning btn-sm" onclick="App.adminCmd('clear-logs')">Clear Old Logs</button>
+            </div>
+          </div>
+        </div>
+        <div class="admin-cmd-result" id="adminCmdResult" style="display:none"></div>
+      </div>
+
+      <!-- Log Viewer -->
+      <div class="admin-section">
+        <h3>Log Viewer</h3>
+        <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+          <select class="form-control" id="logFileSelect" style="width:auto;min-width:220px" onchange="App.adminLoadLog()">
+            <option value="">-- Select log file --</option>
+          </select>
+          <button class="btn btn-sm btn-outline" onclick="App.adminLoadLog()">Refresh</button>
+          <label style="color:var(--text-muted);font-size:.85rem;display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="logAutoScroll" checked> Auto-scroll
+          </label>
+        </div>
+        <div class="admin-log-viewer" id="adminLogContent">
+          <div style="color:var(--text-muted);padding:20px;text-align:center">Select a log file to view</div>
+        </div>
+      </div>
+
+      <!-- Startup Commands Reference -->
+      <div class="admin-section">
+        <h3>VPS Startup Commands</h3>
+        <div class="admin-commands-ref">
+          <div class="cmd-ref-item">
+            <div class="cmd-ref-label">1. Start Chrome with CDP</div>
+            <code class="cmd-ref-code">start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\chrome-parser-profile --no-first-run</code>
+          </div>
+          <div class="cmd-ref-item">
+            <div class="cmd-ref-label">2. Start Server</div>
+            <code class="cmd-ref-code">cd C:\Users\green.eldar\parser2\amazon-main\parser && node server.js</code>
+          </div>
+          <div class="cmd-ref-item">
+            <div class="cmd-ref-label">3. Start Worker</div>
+            <code class="cmd-ref-code">cd C:\Users\green.eldar\parser2\amazon-main\parser && node worker.js</code>
+          </div>
+          <div class="cmd-ref-item">
+            <div class="cmd-ref-label">4. Update from GitHub</div>
+            <code class="cmd-ref-code">cd C:\Users\green.eldar\parser2\amazon-main && git pull origin main && cd parser && npm install</code>
+          </div>
+        </div>
       </div>
     </div>
   </main>

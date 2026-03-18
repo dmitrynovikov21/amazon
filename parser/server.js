@@ -480,6 +480,267 @@ app.get('/api/status/browser', authMiddleware, async (req, res) => {
   }
 });
 
+// --------------- Admin API ---------------
+
+const { exec, spawn } = require('child_process');
+const os = require('os');
+
+// Track server start time
+const serverStartTime = Date.now();
+
+// GET /api/admin/status — system info
+app.get('/api/admin/status', authMiddleware, async (req, res) => {
+  try {
+    const dbPath = path.resolve(__dirname, config.paths.db);
+    let dbSize = 0;
+    try { dbSize = fs.statSync(dbPath).size; } catch (e) {}
+
+    const logsDir = path.resolve(__dirname, config.paths.logs);
+    let logFiles = [];
+    try {
+      logFiles = fs.readdirSync(logsDir)
+        .filter(f => f.endsWith('.log'))
+        .sort()
+        .reverse()
+        .slice(0, 10);
+    } catch (e) {}
+
+    // Check if worker.js is running (look for node process with worker.js)
+    let workerRunning = false;
+    try {
+      const isWin = os.platform() === 'win32';
+      const cmd = isWin
+        ? 'tasklist /FI "IMAGENAME eq node.exe" /FO CSV /NH'
+        : 'ps aux | grep "node worker.js" | grep -v grep';
+      const result = require('child_process').execSync(cmd, { encoding: 'utf8', timeout: 5000 });
+      workerRunning = isWin
+        ? result.includes('node.exe') // approximation; will refine with PID file
+        : result.trim().length > 0;
+    } catch (e) {}
+
+    // Check worker PID file
+    const pidFile = path.resolve(__dirname, 'worker.pid');
+    let workerPid = null;
+    try {
+      workerPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim());
+      // Verify PID is still alive
+      try { process.kill(workerPid, 0); } catch (e) { workerPid = null; }
+    } catch (e) {}
+
+    res.json({
+      server: {
+        uptime: Math.floor((Date.now() - serverStartTime) / 1000),
+        uptimeStr: formatUptime(Date.now() - serverStartTime),
+        pid: process.pid,
+        nodeVersion: process.version,
+        platform: os.platform(),
+        hostname: os.hostname(),
+        cwd: process.cwd(),
+      },
+      memory: {
+        total: os.totalmem(),
+        free: os.freemem(),
+        used: os.totalmem() - os.freemem(),
+        processRss: process.memoryUsage().rss,
+      },
+      db: {
+        path: dbPath,
+        size: dbSize,
+        sizeStr: formatBytes(dbSize),
+      },
+      worker: {
+        pid: workerPid,
+        running: workerPid !== null,
+      },
+      config: {
+        port: config.port,
+        cdpEndpoint: config.cdpEndpoint,
+        defaultSpeed: config.defaultSpeed,
+      },
+      logFiles,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/logs?file=parser-2026-03-18.log&lines=200
+app.get('/api/admin/logs', authMiddleware, (req, res) => {
+  try {
+    const logsDir = path.resolve(__dirname, config.paths.logs);
+    const fileName = req.query.file || '';
+    const lines = parseInt(req.query.lines) || 200;
+
+    if (!fileName) {
+      // Return list of log files
+      let files = [];
+      try {
+        files = fs.readdirSync(logsDir)
+          .filter(f => f.endsWith('.log'))
+          .map(f => {
+            const stat = fs.statSync(path.join(logsDir, f));
+            return { name: f, size: stat.size, sizeStr: formatBytes(stat.size), modified: stat.mtime };
+          })
+          .sort((a, b) => new Date(b.modified) - new Date(a.modified));
+      } catch (e) {}
+      return res.json({ files });
+    }
+
+    // Sanitize filename
+    const safe = path.basename(fileName);
+    const filePath = path.join(logsDir, safe);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Log file not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    const allLines = content.split('\n');
+    const tail = allLines.slice(-lines).join('\n');
+
+    res.json({ file: safe, totalLines: allLines.length, lines: tail });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/command — execute predefined commands
+app.post('/api/admin/command', authMiddleware, (req, res) => {
+  const { command } = req.body;
+  const isWin = os.platform() === 'win32';
+
+  const commands = {
+    'start-worker': () => {
+      const pidFile = path.resolve(__dirname, 'worker.pid');
+      // Check if already running
+      try {
+        const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim());
+        process.kill(pid, 0); // throws if not running
+        return { success: false, message: 'Worker already running (PID: ' + pid + ')' };
+      } catch (e) {}
+
+      // Start worker as detached process
+      const workerPath = path.resolve(__dirname, 'worker.js');
+      const logFile = path.resolve(__dirname, config.paths.logs, 'worker-stdout.log');
+      const out = fs.openSync(logFile, 'a');
+      const err = fs.openSync(logFile, 'a');
+      const child = spawn('node', [workerPath], {
+        detached: true,
+        stdio: ['ignore', out, err],
+        cwd: __dirname,
+      });
+      child.unref();
+      fs.writeFileSync(pidFile, String(child.pid));
+      return { success: true, message: 'Worker started (PID: ' + child.pid + ')' };
+    },
+
+    'stop-worker': () => {
+      const pidFile = path.resolve(__dirname, 'worker.pid');
+      try {
+        const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim());
+        if (isWin) {
+          require('child_process').execSync(`taskkill /PID ${pid} /F`, { timeout: 5000 });
+        } else {
+          process.kill(pid, 'SIGTERM');
+        }
+        try { fs.unlinkSync(pidFile); } catch (e) {}
+        return { success: true, message: 'Worker stopped (PID: ' + pid + ')' };
+      } catch (e) {
+        try { fs.unlinkSync(pidFile); } catch (e2) {}
+        return { success: false, message: 'Worker not running or already stopped' };
+      }
+    },
+
+    'start-chrome': () => {
+      if (isWin) {
+        const chromeCmd = `start "" "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\\chrome-parser-profile --no-first-run`;
+        exec(chromeCmd, { shell: 'cmd.exe' });
+        return { success: true, message: 'Chrome start command sent' };
+      }
+      return { success: false, message: 'Chrome start only available on Windows VPS' };
+    },
+
+    'stop-chrome': () => {
+      if (isWin) {
+        try {
+          require('child_process').execSync('taskkill /IM chrome.exe /F', { timeout: 5000 });
+          return { success: true, message: 'Chrome processes killed' };
+        } catch (e) {
+          return { success: false, message: 'No Chrome processes found' };
+        }
+      }
+      return { success: false, message: 'Chrome stop only available on Windows VPS' };
+    },
+
+    'db-backup': () => {
+      const dbPath = path.resolve(__dirname, config.paths.db);
+      if (!fs.existsSync(dbPath)) {
+        return { success: false, message: 'Database file not found' };
+      }
+      db.saveToDisk();
+      const backupName = `parser-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.db`;
+      const backupPath = path.resolve(__dirname, backupName);
+      fs.copyFileSync(dbPath, backupPath);
+      return { success: true, message: 'Backup created: ' + backupName };
+    },
+
+    'clear-logs': () => {
+      const logsDir = path.resolve(__dirname, config.paths.logs);
+      try {
+        const files = fs.readdirSync(logsDir).filter(f => f.endsWith('.log'));
+        let deleted = 0;
+        for (const f of files) {
+          // Keep today's log
+          const today = new Date().toISOString().split('T')[0];
+          if (!f.includes(today)) {
+            fs.unlinkSync(path.join(logsDir, f));
+            deleted++;
+          }
+        }
+        return { success: true, message: `Deleted ${deleted} old log files` };
+      } catch (e) {
+        return { success: false, message: e.message };
+      }
+    },
+
+    'save-db': () => {
+      db.saveToDisk();
+      return { success: true, message: 'Database saved to disk' };
+    },
+  };
+
+  if (!command || !commands[command]) {
+    return res.status(400).json({
+      error: 'Invalid command. Available: ' + Object.keys(commands).join(', ')
+    });
+  }
+
+  try {
+    const result = commands[command]();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Helper functions
+function formatUptime(ms) {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 // --------------- SPA fallback ---------------
 
 app.get('*', (req, res) => {
