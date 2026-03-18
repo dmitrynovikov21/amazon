@@ -22,6 +22,17 @@
   <main class="main-content">
     <!-- Dashboard View -->
     <div id="view-dashboard" class="view" style="display:none;">
+      <div class="browser-status" id="browserStatus">
+        <div class="status-item">
+          <span class="status-dot" id="chromeDot"></span>
+          <span>Chrome CDP</span>
+        </div>
+        <div class="status-item">
+          <span class="status-dot" id="scDot"></span>
+          <span>Seller Central</span>
+        </div>
+        <button class="btn btn-sm btn-outline" onclick="App.checkBrowser()">Check</button>
+      </div>
       <div class="stats-grid" id="statsGrid">
         <div class="stat-card stat-primary">
           <span class="stat-label">Total Jobs</span>

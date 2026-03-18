@@ -220,6 +220,49 @@ a:hover { text-decoration: underline; }
   padding: 24px;
 }
 
+/* ===== BROWSER STATUS ===== */
+.browser-status {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 20px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #a0a0b0;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #666;
+  display: inline-block;
+}
+
+.status-dot.green {
+  background: #00b894;
+  box-shadow: 0 0 6px rgba(0,184,148,0.5);
+}
+
+.status-dot.red {
+  background: #e74c3c;
+  box-shadow: 0 0 6px rgba(231,76,60,0.5);
+}
+
+.status-dot.yellow {
+  background: #f39c12;
+  box-shadow: 0 0 6px rgba(243,156,18,0.5);
+}
+
 /* ===== STATS CARDS ===== */
 .stats-grid {
   display: grid;

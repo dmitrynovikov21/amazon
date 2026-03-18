@@ -422,6 +422,47 @@ app.get('/api/stats', authMiddleware, (req, res) => {
   }
 });
 
+// --------------- Browser Status ---------------
+
+// GET /api/status/browser
+app.get('/api/status/browser', authMiddleware, async (req, res) => {
+  try {
+    const { chromium } = require('playwright');
+    let browserStatus = { chrome: false, sellerCentral: false, url: '', error: null };
+
+    let browser = null;
+    try {
+      browser = await chromium.connectOverCDP(config.cdpEndpoint, { timeout: 5000 });
+      browserStatus.chrome = true;
+
+      const ctx = browser.contexts()[0];
+      if (ctx) {
+        const pages = ctx.pages();
+        for (const page of pages) {
+          const url = page.url();
+          if (url.includes('sellercentral.amazon.com')) {
+            browserStatus.url = url;
+            // Check if we're on a login/auth page
+            const isLoginPage = url.includes('/ap/signin') || url.includes('/ap/widget') || url.includes('/authorization/');
+            browserStatus.sellerCentral = !isLoginPage;
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      browserStatus.error = err.message;
+    } finally {
+      if (browser) {
+        try { await browser.close(); } catch(e) {}
+      }
+    }
+
+    res.json(browserStatus);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --------------- SPA fallback ---------------
 
 app.get('*', (req, res) => {

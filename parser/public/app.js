@@ -66,6 +66,25 @@ const App = (function () {
   function hideAllViews() { document.querySelectorAll('.view').forEach(v => v.style.display = 'none'); }
   function showView(name) { const el = document.getElementById('view-' + name); if (el) el.style.display = 'block'; }
 
+  // ---- Browser Status ----
+  async function checkBrowserStatus() {
+    const chromeDot = document.getElementById('chromeDot');
+    const scDot = document.getElementById('scDot');
+    if (!chromeDot || !scDot) return;
+    // Set yellow while checking
+    chromeDot.className = 'status-dot yellow';
+    scDot.className = 'status-dot yellow';
+    try {
+      const status = await api('/api/status/browser');
+      chromeDot.className = 'status-dot ' + (status.chrome ? 'green' : 'red');
+      scDot.className = 'status-dot ' + (status.sellerCentral ? 'green' : 'red');
+    } catch (err) {
+      chromeDot.className = 'status-dot red';
+      scDot.className = 'status-dot red';
+      console.error('Browser status error:', err);
+    }
+  }
+
   // ---- Dashboard ----
   async function loadDashboard() {
     try {
@@ -75,6 +94,7 @@ const App = (function () {
       setText('stat-parsed', fmtNum(stats.parsedItems));
       setText('stat-errors', fmtNum(stats.errorItems));
       renderJobsTable(Array.isArray(jobs) ? jobs : []);
+      checkBrowserStatus();
     } catch (err) { console.error('Dashboard error:', err); }
   }
 
@@ -405,5 +425,5 @@ const App = (function () {
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { navigate, logout: goLogin, openNewJobModal, closeNewJobModal, createJob, deleteJob, doJobAction, jobAction, exportJob, goPage, loadDashboard, loadJobDetail };
+  return { navigate, logout: goLogin, openNewJobModal, closeNewJobModal, createJob, deleteJob, doJobAction, jobAction, exportJob, goPage, loadDashboard, loadJobDetail, checkBrowser: checkBrowserStatus };
 })();
